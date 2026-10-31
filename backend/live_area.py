@@ -69,7 +69,8 @@ def _test_source() -> Optional[Source]:
             el = dict(el)
             if el.get("geometry"):
                 el["geometry"] = [{"lat": g["lat"] + dlat, "lon": g["lon"] + dlon} for g in el["geometry"]]
-            if not buildings and (el.get("tags") or {}).get("building"):
+            tags = el.get("tags") or {}
+            if tags.get("building") and not _keep_building(tags, buildings):
                 continue
             els.append(el)
         a, b = synthetic.PROJ.to_latlon(620, 1690)
@@ -81,6 +82,15 @@ def _test_source() -> Optional[Source]:
         dem.name = "Elevasi: SINTETIS (mode uji)"
         return {"elements": els}, dem
     return src
+
+
+def _keep_building(tags: dict, buildings) -> bool:
+    if buildings == "tall":
+        try:
+            return float(str(tags.get("building:levels", "0")).split(";")[0]) >= 2 or bool(tags.get("height"))
+        except ValueError:
+            return bool(tags.get("height"))
+    return bool(buildings)
 
 
 def _reachable_safe(area: dict, lat: float, lon: float) -> bool:
@@ -107,7 +117,7 @@ def _inland_shift(area: dict, lat: float, lon: float, dist_m: float) -> Tuple[fl
     return lat + vy / L * dist_m / 111320.0, lon + vx / L * dist_m / kx
 
 
-def build_bbox(bbox: Tuple[float, float, float, float], *, area_id: str, name: str, buildings: bool,
+def build_bbox(bbox: Tuple[float, float, float, float], *, area_id: str, name: str, buildings,
                source: Source, log=print, kind: str = "live") -> dict:
     data, dem = source(bbox, buildings)
     area = build_area(data, dem, area_id=area_id, name=name, log=log,
@@ -129,7 +139,7 @@ def build_around(lat: float, lon: float, *, source: Optional[Source] = None, cac
     name = None if os.environ.get("SEMPAT_FAKE_OSM") == "1" else osm_fetch.reverse_name(lat, lon)
     name = name or f"Sekitar {lat:.3f}, {lon:.3f}"
     log(f"Membangun peta di sekitar {lat:.5f}, {lon:.5f} ({name}) ...")
-    area = build_bbox(bbox_around(clat, clon, HALF_M), area_id=aid, name=name, buildings=False,
+    area = build_bbox(bbox_around(clat, clon, HALF_M), area_id=aid, name=name, buildings="tall",
                       source=src, log=log)
     if area.get("coastline") and not _reachable_safe(area, lat, lon):
         log("  Belum ada tempat aman terjangkau; perluas peta ke arah daratan ...")
@@ -138,7 +148,7 @@ def build_around(lat: float, lon: float, *, source: Optional[Source] = None, cac
         # pastikan posisi warga tetap tercakup
         s, w, n, e = big
         big = (min(s, lat - 0.008), min(w, lon - 0.008), max(n, lat + 0.008), max(e, lon + 0.008))
-        area2 = build_bbox(big, area_id=aid, name=name, buildings=False, source=src, log=log)
+        area2 = build_bbox(big, area_id=aid, name=name, buildings="tall", source=src, log=log)
         area2["meta"]["expanded"] = True
         area = area2
     area["meta"]["built_for"] = [round(lon, 6), round(lat, 6)]

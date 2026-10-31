@@ -40,3 +40,10 @@ LLM_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 LLM_MODEL = os.environ.get("SEMPAT_LLM_MODEL", "")
 
 TOKEN_TTL_S = 12 * 3600
+
+# Google Earth Engine (opsional) untuk tinggi gedung Google Open Buildings 2.5D.
+# Isi dengan ID proyek Google Cloud yang sudah terdaftar di Earth Engine, lalu jalankan sekali:
+#   pip install -r requirements-ee.txt  &&  earthengine authenticate
+EE_PROJECT = os.environ.get("SEMPAT_EE_PROJECT", "")
+EE_YEAR = int(os.environ.get("SEMPAT_EE_YEAR", "2023"))
+EE_LIVE = os.environ.get("SEMPAT_EE_LIVE", "0") == "1"  # ikut ambil tinggi saat peta otomatis dibangun

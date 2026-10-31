@@ -44,6 +44,7 @@
       <p class="nav-turn" id="navTurn" aria-live="polite"></p>
       <p id="navDest" style="margin:0"></p>
       <div id="navVerdict" class="verdict unknown" role="status"></div>
+      <div id="navVertical" aria-live="polite"></div>
       <label class="check"><input type="checkbox" id="slowToggle"> Saya berjalan lambat / bersama lansia, anak, atau difabel</label>
       <div class="row" id="navActions"></div>
       <p id="navWarn" class="small muted hidden"></p>
@@ -61,6 +62,7 @@
       <span><i class="swatch box" style="background:#166534;border-radius:50%"></i>Posko / bantuan</span>
       <span><i class="swatch box" style="background:#14532d"></i>Titik kumpul resmi</span>
       <span><i class="swatch box" style="background:#475569;border-radius:50%"></i>Fasilitas umum (OSM)</span>
+      <span><i class="swatch box" style="background:#6d28d9"></i>Gedung evakuasi darurat (L3+ = naik minimal lantai 3)</span>
     </div>
 
     <section id="locCard" class="card stack" aria-labelledby="locTitle">
@@ -92,6 +94,9 @@
         <li>Setelah sampai di tempat aman, SEMPAT menunjukkan posko terdekat yang masih buka dan belum penuh.</li>
         <li>Rute terakhir disimpan di ponsel. Saat internet putus, panah tetap bekerja dengan data terakhir.</li>
         <li>Rute dihitung dari peta jalan dan ketinggian tanah: jalan menanjak lebih lambat (rumus Tobler), kecepatan 1,0 m/detik (umum) dan 0,5 m/detik (lansia/difabel).</li>
+        <li><strong>Tidak sempat ke tanah tinggi?</strong> SEMPAT menunjukkan gedung beton bertingkat terdekat dan <em>lantai minimum</em> yang aman. Lantai dihitung dari perkiraan genangan (tinggi tsunami − ketinggian tanah): genangan 2 m → lantai 3 ke atas, 3 m → lantai 4 (pedoman gedung evakuasi tsunami Jepang). Gedung tanpa data jumlah lantai, rumah pribadi, dan bangunan kayu/bata tidak disarankan.</li>
+        <li>Tingkat peringatan mengikuti BMKG: <strong>Waspada</strong> (&lt; 0,5 m) cukup menjauhi pantai dan sungai; <strong>Siaga</strong> (0,5–3 m) dan <strong>Awas</strong> (&gt; 3 m) berarti evakuasi.</li>
+        <li>Rute menghindari terowongan/underpass di zona bahaya (tergenang lebih dulu) dan jembatan dekat pantai (tsunami naik lewat sungai).</li>
         <li>SEMPAT membantu, bukan pengganti arahan resmi BMKG, BPBD, dan petugas di lapangan.</li>
       </ul>
     </details>

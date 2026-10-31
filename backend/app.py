@@ -24,7 +24,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, bmkg, config, guidance, live_area, osm_fetch, webpush
+from . import (__version__, area_builder, auth, bmkg, config, guidance, heights, live_area, osm_fetch, tsunami,
+               webpush)
 from .engine import POINT_STATUSES, Engine
 from .events import Broker
 from .geo import haversine_m
@@ -58,11 +59,11 @@ def _parse_iso(s: Optional[str]) -> Optional[float]:
 # ---------------------------------------------------------------------------
 class AreaCtx:
     def __init__(self, area: dict):
-        self.area = area
+        self.area = area_builder.upgrade_area(area)
         self.id = area["meta"]["id"]
         self.meta = area["meta"]
-        self.engine = Engine(area)
-        self.area_bytes = json.dumps(area, separators=(",", ":")).encode()
+        self.engine = Engine(self.area)
+        self.refresh_bytes()
         self.tables_bytes = b"{}"
         self.version = 0
         self.lock = threading.Lock()
@@ -70,10 +71,45 @@ class AreaCtx:
         self.facilities = [dict(f, status="osm", services=[], capacity=None, verified=False, updated_at=None)
                            for f in area.get("facilities") or []]
 
+    def refresh_bytes(self) -> None:
+        self.area_bytes = json.dumps(self.area, separators=(",", ":")).encode()
+
+    def apply_survey(self, info: dict) -> Optional[dict]:
+        """Timpa data gedung dengan hasil survei petugas (sumber paling dipercaya)."""
+        i = self.engine.bindex.get(info["building_id"])
+        if i is None:
+            return None
+        b = self.engine.buildings[i]
+        if "_auto" not in b:  # simpan nilai otomatis agar survei bisa dibatalkan
+            b["_auto"] = {k: b.get(k) for k in ("levels", "levels_src", "basement", "structure")}
+        if info.get("levels"):
+            b["levels"] = int(info["levels"])
+            b["levels_src"] = "survey"
+        b["basement"] = int(info.get("basement") or 0)
+        if info.get("structure"):
+            b["structure"] = info["structure"]
+        b["access"] = info.get("access") or None
+        b["roof"] = bool(info.get("roof"))
+        b["slf"] = bool(info.get("slf"))
+        b["verified"] = True
+        b["survey"] = {"by": info.get("updated_by"), "at": info.get("updated_at"), "note": info.get("note") or ""}
+        heights._refresh_candidate(b, self.area["params"])
+        return b
+
+    def clear_survey(self, bid: str) -> None:
+        i = self.engine.bindex.get(bid)
+        if i is None:
+            return
+        b = self.engine.buildings[i]
+        b.update(b.pop("_auto", {}))
+        for k in ("access", "roof", "slf", "verified", "survey"):
+            b.pop(k, None)
+        heights._refresh_candidate(b, self.area["params"])
+
 
 def _meta_summary(meta: dict) -> dict:
     keep = ("id", "name", "kind", "live", "synthetic", "bbox", "center", "counts", "created", "hazard_method",
-            "sources", "expanded")
+            "sources", "expanded", "schema")
     return {k: meta[k] for k in keep if k in meta}
 
 
@@ -145,6 +181,9 @@ class AppState:
             if c is None:
                 path = self.areas_dir / aid / "area.json"
                 c = AreaCtx(json.loads(path.read_text(encoding="utf-8")))
+                for info in self.store.list_building_info(aid):
+                    c.apply_survey(info)
+                c.refresh_bytes()
                 self.ctx[aid] = c
                 self._seed(c)
                 self._evict()
@@ -168,10 +207,14 @@ class AppState:
                 self.store.add_point(c.id, p, "sistem")
             self.store.set_kv(f"seeded:{c.id}", now_iso())
 
-    def find_covering(self, lat: float, lon: float, margin_m: float = live_area.CORE_MARGIN_M) -> Optional[str]:
+    def find_covering(self, lat: float, lon: float, margin_m: float = live_area.CORE_MARGIN_M,
+                      skip_stale: bool = False) -> Optional[str]:
         """Area yang mencakup posisi; area desa yang disiapkan diutamakan daripada area live."""
         best = None
         for m in self.index.values():
+            if skip_stale and m.get("live") and m.get("kind") != "view" \
+                    and m.get("schema", 1) < area_builder.AREA_SCHEMA:
+                continue  # peta otomatis versi lama (tanpa gedung bertingkat): bangun ulang
             if live_area.covers(m, lat, lon, margin_m if m.get("live") else 0):
                 rank = (0 if not m.get("live") else 1, 0 if m.get("kind") == "view" else 1)
                 if best is None or rank < best[0]:
@@ -179,24 +222,41 @@ class AppState:
         return best[1] if best else None
 
     def locate(self, lat: float, lon: float, build: bool = True) -> dict:
-        aid = self.find_covering(lat, lon)
+        can_build = build and config.LIVE_AREAS
+        aid = self.find_covering(lat, lon, skip_stale=can_build)
         if aid:
             return {"area_id": aid, "built": False}
-        if not build or not config.LIVE_AREAS:
+        if not can_build:
             raise HTTPException(404, "Belum ada peta untuk lokasi ini.")
         lid = live_area.live_id(lat, lon)
         with self.lock:
             lk = self.build_locks.setdefault(lid, threading.Lock())
         with lk:
-            aid = self.find_covering(lat, lon)  # mungkin sudah dibangun permintaan lain
+            aid = self.find_covering(lat, lon, skip_stale=True)  # mungkin sudah dibangun permintaan lain
             if aid:
                 return {"area_id": aid, "built": False}
             try:
                 area = live_area.build_around(lat, lon, cache_dir=config.CACHE_DIR / "dem")
             except Exception as exc:
+                old = self.find_covering(lat, lon)  # versi lama tetap lebih baik daripada tidak ada peta
+                if old:
+                    return {"area_id": old, "built": False}
                 raise HTTPException(502, f"Gagal mengunduh peta di sekitar Anda: {exc}")
+            self._maybe_ee(area)
             self.save_area(area)
             return {"area_id": area["meta"]["id"], "built": True}
+
+    @staticmethod
+    def _maybe_ee(area: dict) -> None:
+        """Opsional: lengkapi tinggi gedung dari Google Open Buildings 2.5D saat peta otomatis dibangun."""
+        if not (config.EE_LIVE and config.EE_PROJECT and heights.ee_available()[0]):
+            return
+        try:
+            feats = heights.ee_fetch_heights(area, project=config.EE_PROJECT, year=config.EE_YEAR)
+            heights.apply_heights(area, Engine(area), feats, source="google")
+            heights.add_source_note(area, f"Tinggi gedung: Google Open Buildings 2.5D Temporal {config.EE_YEAR} (CC BY 4.0)")
+        except Exception as exc:  # EE tidak wajib: peta tetap dipakai tanpa data ini
+            print(f"  Earth Engine dilewati: {exc}")
 
     # ---------- peringatan ----------
     def expire_alerts(self) -> bool:
@@ -223,6 +283,13 @@ class AppState:
                 return a
         return None
 
+    @staticmethod
+    def wave_for(c: AreaCtx, alert: Optional[dict]) -> Optional[float]:
+        """Tinggi tsunami untuk menghitung lantai aman; None = skenario rencana area."""
+        if not alert:
+            return None
+        return tsunami.wave_height_for(alert.get("level"), alert.get("wave_m"), c.engine.design_wave_m)
+
     # ---------- titik bantuan ----------
     def points_for(self, c: AreaCtx) -> List[dict]:
         return [dict(p, verified=True) for p in self.store.list_points(c.id)]
@@ -238,7 +305,8 @@ class AppState:
         alert = self.alert_for(c)
         with c.lock:
             lt = c.engine.live_tables(closures=self.closures(c), shelter_ids=self.shelter_ids(c),
-                                      points=self.points_for(c) + c.facilities, alert_active=alert is not None)
+                                      points=self.points_for(c) + c.facilities, alert_active=alert is not None,
+                                      wave_m=self.wave_for(c, alert))
             with self.lock:
                 self.version += 1
                 c.version = self.version
@@ -264,15 +332,19 @@ class AppState:
                     last = a
                     break
         shelters = []
+        wave = self.wave_for(c, active)
         for sid in self.shelter_ids(c):
             i = c.engine.bindex.get(sid)
             if i is not None:
                 b = c.engine.buildings[i]
+                a = c.engine.assess(b, wave)
                 shelters.append({"id": sid, "name": b["name"] or f"Gedung {b['levels']} lantai", "lat": b["lat"],
-                                 "lon": b["lon"], "levels": b["levels"], "capacity": b["capacity"]})
+                                 "lon": b["lon"], "levels": b["levels"], "capacity": a["capacity"],
+                                 "min_floor": a["min_floor"], "usable": tsunami.registered_ok(b, a)})
         return {"version": c.version, "area_id": c.id, "server_time": now_iso(), "alert": active, "last_alert": last,
                 "points": self.store.list_points(c.id), "closures": self.store.list_closures(c.id),
-                "shelters": shelters}
+                "shelters": shelters, "scenario": {"wave_m": c.engine.wave(wave), "design": wave is None,
+                                                   "level": active.get("level") if active else None}}
 
     # ---------- Web Push ----------
     def push_send(self, sub_row: dict, payload: dict) -> int:
@@ -351,7 +423,7 @@ class AnalyzeIn(BaseModel):
 class RouteIn(BaseModel):
     lat: float
     lon: float
-    mode: str = Field("aman", pattern="^(aman|posko)$")
+    mode: str = Field("aman", pattern="^(aman|posko|gedung)$")
     group: str = Field("umum", pattern="^(umum|rentan)$")
     alternatives: int = Field(3, ge=1, le=8)
     area_id: Optional[str] = None
@@ -395,6 +467,8 @@ class SimulateIn(BaseModel):
     eta_min: Optional[float] = Field(None, ge=1, le=240)
     area_id: Optional[str] = None
     scope: str = Field("area", pattern="^(area|all)$")
+    level: str = Field("awas", pattern="^(waspada|siaga|awas)$")
+    wave_m: Optional[float] = Field(None, ge=0.1, le=40)
 
 
 class EndAlertIn(BaseModel):
@@ -408,6 +482,7 @@ class PlanIn(BaseModel):
     optimize_k: int = Field(0, ge=0, le=15)
     use_registered: bool = True
     area_id: Optional[str] = None
+    design_height_m: Optional[float] = Field(None, ge=0.5, le=40)
 
 
 class PointInfoIn(BaseModel):
@@ -416,6 +491,27 @@ class PointInfoIn(BaseModel):
     eta_min: float = Field(20, ge=1, le=240)
     llm: bool = False
     area_id: Optional[str] = None
+
+
+class SurveyIn(BaseModel):
+    area_id: Optional[str] = None
+    levels: Optional[int] = Field(None, ge=1, le=200)
+    basement: int = Field(0, ge=0, le=10)
+    structure: str = Field("tidak_tahu", pattern="^(beton|baja|bata|ringan|tidak_tahu)$")
+    access: str = Field("24jam", pattern="^(24jam|jam_kerja|tidak)$")
+    roof: bool = False
+    slf: bool = False
+    note: str = Field("", max_length=200)
+
+
+class GeoUploadIn(BaseModel):
+    geojson: dict
+    name: str = Field("", max_length=120)
+
+
+class EEIn(BaseModel):
+    year: int = Field(2023, ge=2016, le=2023)
+    add_missing: bool = True
 
 
 class SubIn(BaseModel):
@@ -441,9 +537,13 @@ class SelfSimIn(BaseModel):
 def _alert_payload(a: dict, kind: str = "alert") -> dict:
     sim = a.get("source") == "SIMULASI"
     title = (a.get("headline") or "PERINGATAN DINI TSUNAMI") + (" — SIMULASI" if sim else "")
-    body = ("[SIMULASI] " if sim else "") + "Segera menjauh dari pantai dan sungai, naik ke tempat tinggi. Ketuk untuk melihat arah."
+    if a.get("level") == "waspada":
+        act = "Jauhi pantai dan tepi sungai. Tidak perlu mengungsi ke tempat tinggi."
+    else:
+        act = "Segera menjauh dari pantai dan sungai, naik ke tempat tinggi. Ketuk untuk melihat arah."
+    body = ("[SIMULASI] " if sim else "") + act
     keep = ("id", "source", "event", "magnitude", "depth_km", "lat", "lon", "region", "tsunami", "issued_at",
-            "eta_min", "headline", "instruction", "radius_km", "self")
+            "eta_min", "headline", "instruction", "radius_km", "self", "level", "wave_m")
     return {"type": kind, "title": title, "body": body, "tag": a.get("id"), "url": f"/?alert={a.get('id')}",
             "alert": {k: a.get(k) for k in keep if k in a}}
 
@@ -655,7 +755,7 @@ def api_route(body: RouteIn, st: AppState = Depends(get_state)):
                               "reason": "Anda masih di zona bahaya. Menuju tempat aman lebih dulu."})
     r = c.engine.route(body.lat, body.lon, mode=body.mode, group=body.group, closures=st.closures(c),
                        shelter_ids=st.shelter_ids(c), points=st.points_for(c) + c.facilities, alert_active=alert_on,
-                       alternatives=body.alternatives)
+                       alternatives=body.alternatives, wave_m=st.wave_for(c, st.alert_for(c)))
     r["area_id"] = c.id
     return _json(r)
 
@@ -784,14 +884,16 @@ def api_simulate(body: SimulateIn, user: dict = Depends(require("petugas", "pere
     lat = lat0 - body.distance_km / 111.2  # pusat gempa simulasi di laut, arah selatan area
     eta = body.eta_min if body.eta_min is not None else float(c.area["params"].get("default_eta_min", 20))
     region = f"{body.distance_km:.0f} km arah selatan {c.meta['name']}"
+    level = body.level if body.tsunami else None
     txt = guidance.alert_text(tsunami=body.tsunami, magnitude=body.magnitude, region=region, eta_min=eta,
-                              simulated=True)
+                              simulated=True, level=level)
     a = create_alert(st, {"source": "SIMULASI", "event": "Tsunami" if body.tsunami else "Gempa",
                           "magnitude": body.magnitude, "depth_km": body.depth_km, "lat": lat, "lon": lon0,
                           "region": region, "tsunami": 1 if body.tsunami else 0,
                           "eta_min": eta if body.tsunami else None, "headline": txt["headline"],
                           "instruction": txt["instruction"], "created_by": user["username"],
-                          "radius_km": None if body.scope == "all" else body.distance_km + 60})
+                          "radius_km": None if body.scope == "all" else body.distance_km + 60,
+                          "level": level, "wave_m": body.wave_m if body.tsunami else None})
     st.store.audit(user["username"], "simulate_alert", {"id": a["id"], "area": c.id, "scope": body.scope})
     return _json(a, 201)
 
@@ -903,7 +1005,8 @@ def api_plan(body: PlanIn, user: dict = Depends(require("perencana")), st: AppSt
     c = st.get(body.area_id)
     shelters = st.shelter_ids(c) if body.use_registered else []
     r = c.engine.plan(eta_min=body.eta_min, delay_min=body.delay_min, margin_min=body.margin_min,
-                      shelter_ids=shelters, closures=st.closures(c), optimize_k=body.optimize_k)
+                      shelter_ids=shelters, closures=st.closures(c), optimize_k=body.optimize_k,
+                      design_height_m=body.design_height_m)
     return _json(r)
 
 
@@ -916,6 +1019,132 @@ def api_point_info(body: PointInfoIn, user: dict = Depends(require("perencana"))
     text = guidance.template_guidance(info, body.eta_min, place, note)
     llm_text = guidance.llm_rewrite(text) if body.llm else None
     return _json({"info": info, "guidance": llm_text or text, "guidance_source": "llm" if llm_text else "templat"})
+
+
+# ---- gedung: kelayakan evakuasi vertikal & survei petugas ----
+def _building_view(c: AreaCtx, b: dict, wave: Optional[float]) -> dict:
+    public = {k: v for k, v in b.items() if k not in ("poly", "_auto")}
+    ok, why = tsunami.eligible(b)
+    scen = {lv: c.engine.assess(b, tsunami.wave_height_for(lv, None, c.engine.design_wave_m)) for lv in tsunami.LEVELS}
+    return {"building": public, "eligible": ok, "why": why, "now": c.engine.assess(b, wave),
+            "levels": scen, "design_m": c.engine.design_wave_m, "source_label": tsunami.LEVEL_SOURCES.get(
+                b.get("levels_src", "default"), b.get("levels_src"))}
+
+
+@app.get("/api/buildings/{bid}")
+def api_building(bid: str, area: Optional[str] = None, st: AppState = Depends(get_state)):
+    c = st.get(area)
+    i = c.engine.bindex.get(bid)
+    if i is None:
+        raise HTTPException(404, "Bangunan tidak ditemukan.")
+    return _json(_building_view(c, c.engine.buildings[i], st.wave_for(c, st.alert_for(c))))
+
+
+@app.put("/api/buildings/{bid}")
+def api_survey_building(bid: str, body: SurveyIn, user: dict = Depends(require("petugas", "perencana")),
+                        st: AppState = Depends(get_state)):
+    c = st.get(body.area_id)
+    if bid not in c.engine.bindex:
+        raise HTTPException(404, "Bangunan tidak ditemukan.")
+    info = st.store.set_building_info(c.id, bid, body.model_dump(exclude={"area_id"}), user["name"])
+    with c.lock:
+        b = c.apply_survey(info)
+        c.refresh_bytes()
+    st.store.audit(user["username"], "survey_building", {"id": bid, "area": c.id, **body.model_dump(exclude={"area_id"})})
+    st.recompute(c.id, "survey")
+    st.broker.publish("area", {"area": c.id, "reason": "survey"})
+    return _json(_building_view(c, b, st.wave_for(c, st.alert_for(c))))
+
+
+@app.delete("/api/buildings/{bid}/survey")
+def api_clear_survey(bid: str, area: Optional[str] = None, user: dict = Depends(require("petugas", "perencana")),
+                     st: AppState = Depends(get_state)):
+    c = st.get(area)
+    st.store.delete_building_info(c.id, bid)
+    with c.lock:
+        c.clear_survey(bid)
+        c.refresh_bytes()
+    st.store.audit(user["username"], "clear_survey", {"id": bid, "area": c.id})
+    st.recompute(c.id, "survey")
+    st.broker.publish("area", {"area": c.id, "reason": "survey"})
+    return _json({"ok": True})
+
+
+def _reload_area(st: AppState, aid: str, reason: str) -> None:
+    st.recompute(aid, reason)
+    st.broker.publish("area", {"area": aid, "reason": reason})
+
+
+@app.post("/api/areas/{aid}/hazard")
+def api_upload_hazard(aid: str, body: GeoUploadIn, user: dict = Depends(require("perencana")),
+                      st: AppState = Depends(get_state)):
+    c = st.get(aid)
+    rings = heights.parse_hazard_polygons(body.geojson)
+    if not rings:
+        raise HTTPException(400, "Berkas tidak berisi poligon (Polygon/MultiPolygon) zona bahaya.")
+    area = json.loads(c.area_bytes)
+    try:
+        r = area_builder.apply_hazard_polygons(area, rings, (body.name or "peta bahaya resmi (unggahan)")[:120])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if r["safe_nodes"] == 0:
+        raise HTTPException(400, "Setelah peta ini dipakai, tidak ada jalan yang berada di luar zona bahaya. "
+                                 "Periksa berkas (koordinat harus lon,lat WGS84) atau perluas area.")
+    _save_keep_surveys(st, area)
+    st.store.audit(user["username"], "upload_hazard", {"area": aid, "polygons": len(rings), **r})
+    _reload_area(st, aid, "hazard")
+    return _json({"ok": True, "polygons": len(rings), **r})
+
+
+@app.post("/api/areas/{aid}/heights")
+def api_upload_heights(aid: str, body: GeoUploadIn, user: dict = Depends(require("perencana")),
+                       st: AppState = Depends(get_state)):
+    c = st.get(aid)
+    feats = heights.parse_height_features(body.geojson)
+    if not feats:
+        raise HTTPException(400, "Tidak ada fitur dengan properti height (meter) atau levels (jumlah lantai).")
+    area = json.loads(c.area_bytes)
+    stats = heights.apply_heights(area, c.engine, feats, source="upload")
+    heights.add_source_note(area, f"Tinggi gedung: {(body.name or 'unggahan perencana')[:100]}")
+    _save_keep_surveys(st, area)
+    st.store.audit(user["username"], "upload_heights", {"area": aid, **stats})
+    _reload_area(st, aid, "heights")
+    return _json({"ok": True, **stats})
+
+
+@app.post("/api/areas/{aid}/heights/ee")
+def api_ee_heights(aid: str, body: EEIn, user: dict = Depends(require("perencana")),
+                   st: AppState = Depends(get_state)):
+    ok, why = heights.ee_available()
+    if not config.EE_PROJECT:
+        raise HTTPException(503, "Earth Engine belum diatur: isi SEMPAT_EE_PROJECT dengan ID proyek Google Cloud "
+                                 "yang terdaftar di Earth Engine, lalu jalankan 'earthengine authenticate'.")
+    if not ok:
+        raise HTTPException(503, why)
+    c = st.get(aid)
+    area = json.loads(c.area_bytes)
+    try:
+        feats = heights.ee_fetch_heights(area, project=config.EE_PROJECT, year=body.year,
+                                         add_missing=body.add_missing)
+    except Exception as exc:
+        raise HTTPException(502, f"Earth Engine gagal: {str(exc)[:300]}")
+    stats = heights.apply_heights(area, c.engine, feats, source="google")
+    heights.add_source_note(area, f"Tinggi gedung: Google Open Buildings 2.5D Temporal {body.year} (CC BY 4.0)")
+    _save_keep_surveys(st, area)
+    st.store.audit(user["username"], "ee_heights", {"area": aid, "year": body.year, **stats})
+    _reload_area(st, aid, "heights")
+    return _json({"ok": True, **stats})
+
+
+def _save_keep_surveys(st: AppState, area: dict) -> None:
+    """Simpan area tanpa nilai survei (survei disimpan terpisah dan diterapkan ulang saat dimuat)."""
+    for b in area["buildings"]:
+        auto = b.pop("_auto", None)
+        if auto:
+            b.update(auto)
+        for k in ("access", "roof", "slf", "verified", "survey"):
+            b.pop(k, None)
+    st.save_area(area)
 
 
 @app.post("/api/demo/reset")

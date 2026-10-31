@@ -75,6 +75,7 @@ export const api = {
   get(p) { return this.req('GET', p); },
   post(p, b = {}) { return this.req('POST', p, b); },
   patch(p, b = {}) { return this.req('PATCH', p, b); },
+  put(p, b = {}) { return this.req('PUT', p, b); },
   del(p) { return this.req('DELETE', p); },
   async login(username, password) {
     const r = await this.post('/api/auth/login', { username, password });
@@ -135,6 +136,11 @@ export class Sync {
     });
     es.addEventListener('alert', (ev) => { const d = JSON.parse(ev.data); this.refresh().then(() => this.onAlert && this.onAlert(d)).catch(() => {}); });
     es.addEventListener('quake', (ev) => { this.onQuake && this.onQuake(JSON.parse(ev.data)); });
+    // Data area berubah (survei gedung, peta bahaya resmi, tinggi gedung): muat ulang tanpa memindah kamera.
+    es.addEventListener('area', (ev) => {
+      const d = JSON.parse(ev.data);
+      if (this.area && d.area === this.areaId) this.loadArea().catch(() => {});
+    });
     es.onerror = () => this.setConn(false);
     es.onopen = () => this.setConn(true);
     this.es = es;
@@ -195,7 +201,9 @@ function roadsGeoJSON(area) {
 export function buildingsGeoJSON(area, statusArr) {
   if (!area) return fc();
   return { type: 'FeatureCollection', features: area.buildings.map((b, i) => ({ type: 'Feature', id: i,
-    properties: { id: b.id, hazard: b.hazard, candidate: b.candidate ? 1 : 0, kind: b.kind, status: statusArr ? (statusArr[i] || 'none') : 'none' },
+    properties: { id: b.id, hazard: b.hazard, candidate: b.candidate ? 1 : 0, kind: b.kind, status: statusArr ? (statusArr[i] || 'none') : 'none',
+      levels: b.levels || 1, src: b.levels_src || 'osm', verified: b.verified ? 1 : 0,
+      tall: (b.levels || 1) >= 2 && (b.levels_src || 'osm') !== 'default' && b.kind !== 'rumah' ? 1 : 0 },
     geometry: { type: 'Polygon', coordinates: [b.poly.concat([b.poly[0]])] } })) };
 }
 const fc = (features = []) => ({ type: 'FeatureCollection', features });
@@ -237,6 +245,7 @@ export function createMap(container, area, { interactive = true, buildingsColor 
       { id: 'coast', type: 'line', source: 'coast', paint: { 'line-color': '#6b9ac4', 'line-width': 2 } },
       { id: 'bld', type: 'fill', source: 'bld', paint: { 'fill-color': buildingPaint(buildingsColor), 'fill-outline-color': '#6b7280' } },
       { id: 'bld-cand', type: 'line', source: 'bld', filter: ['==', ['get', 'candidate'], 1], paint: { 'line-color': '#1d4ed8', 'line-width': 2 } },
+      { id: 'bld-ver', type: 'line', source: 'bld', filter: ['==', ['get', 'verified'], 1], paint: { 'line-color': '#166534', 'line-width': 3 } },
       { id: 'roads', type: 'line', source: 'roads', filter: ['!=', ['get', 'kind'], 'steps'], layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': '#8d96a0', 'line-width': ['interpolate', ['linear'], ['zoom'], 13, ['case', ['==', ['get', 'kind'], 'road'], 2, 1], 17, ['case', ['==', ['get', 'kind'], 'road'], 7, 3]] } },
       { id: 'steps', type: 'line', source: 'roads', filter: ['==', ['get', 'kind'], 'steps'],
@@ -256,7 +265,7 @@ export function createMap(container, area, { interactive = true, buildingsColor 
   map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
   const attrib = new maplibregl.AttributionControl({ compact: true });
   map.addControl(attrib);
-  const markers = { me: null, dest: null, points: [], official: [], fac: [] };
+  const markers = { me: null, dest: null, points: [], official: [], fac: [], gedung: [] };
   // Siap = gaya peta termuat (tidak menunggu ubin peta dasar, yang bisa lambat atau gagal saat sinyal buruk).
   const ready = new Promise((res) => {
     let done = false;
@@ -350,6 +359,24 @@ export function createMap(container, area, { interactive = true, buildingsColor 
         if (onClick) el.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(p); });
         markers.fac.push(new maplibregl.Marker({ element: el }).setLngLat([p.lon, p.lat]).addTo(map));
       }
+    },
+    // Gedung yang layak untuk evakuasi vertikal: label = lantai minimum yang aman.
+    setGedung(list, onClick) {
+      markers.gedung.forEach((m) => m.remove()); markers.gedung = [];
+      for (const g of list || []) {
+        const el = document.createElement('button');
+        el.type = 'button'; el.className = `mk-gedung${g.verified ? ' ver' : ''}`;
+        el.title = `${g.name} — naik minimal ke lantai ${g.min_floor} (${g.levels} lantai)${g.verified ? ', diverifikasi petugas' : ', belum diverifikasi'}`;
+        el.setAttribute('aria-label', el.title);
+        el.textContent = `L${g.min_floor}+`;
+        if (onClick) el.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(g); });
+        markers.gedung.push(new maplibregl.Marker({ element: el }).setLngLat([g.lon, g.lat]).addTo(map));
+      }
+    },
+    // Bangunan di titik layar (untuk ketuk gedung).
+    buildingAt(point) {
+      const f = map.getLayer('bld') ? map.queryRenderedFeatures(point, { layers: ['bld'] }) : [];
+      return f.length ? f[0].properties.id : null;
     },
     setOfficial(list) {
       markers.official.forEach((m) => m.remove()); markers.official = [];

@@ -1,6 +1,6 @@
 // Service worker SEMPAT: aplikasi tetap terbuka & rute tetap jalan saat internet putus,
 // dan menampilkan notifikasi peringatan (Web Push) walau aplikasi tertutup.
-const VERSION = 'sempat-v2';
+const VERSION = 'sempat-v3';
 const TILES = 'sempat-tiles-v1';
 const MAX_TILES = 1500;
 const SHELL = [

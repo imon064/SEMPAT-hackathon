@@ -139,7 +139,9 @@ export function routeFromTable(area, idx, bundle, mode, group, pos) {
   const list = (bundle.dests && bundle.dests[mode]) || [];
   if (di >= 0 && list[di]) {
     dest = list[di];
-    coords.push([dest.lon, dest.lat]);
+    // Tujuan gabungan tanpa titik tetap (mis. "tanah lebih tinggi"): titik akhir = simpul terakhir.
+    if (dest.lat == null) dest = { ...dest, lat: area.nodes.lat[x], lon: area.nodes.lon[x], elev: area.nodes.elev[x] };
+    else coords.push([dest.lon, dest.lat]);
   } else {
     dest = { type: 'safe_zone', name: 'Zona aman', lat: area.nodes.lat[x], lon: area.nodes.lon[x], elev: area.nodes.elev[x] };
   }

@@ -13,12 +13,25 @@ from typing import Optional
 from . import config
 
 
+LEVEL_NOTE = {
+    "waspada": "WASPADA (perkiraan tinggi < 0,5 m)",
+    "siaga": "SIAGA (perkiraan tinggi 0,5–3 m)",
+    "awas": "AWAS (perkiraan tinggi > 3 m)",
+}
+
+
 def alert_text(*, tsunami: bool, magnitude: Optional[float], region: str, eta_min: Optional[float],
-               simulated: bool) -> dict:
+               simulated: bool, level: Optional[str] = None) -> dict:
+    """Teks peringatan. Tingkat ancaman mengikuti BMKG: Waspada / Siaga / Awas."""
     mag = f"M{magnitude:.1f}".replace(".", ",") if magnitude is not None else "Gempa"
-    if tsunami:
-        headline = "PERINGATAN DINI TSUNAMI"
-        instruction = ("Segera menjauh dari pantai dan sungai, naik ke tempat tinggi atau lantai atas gedung kokoh. "
+    if tsunami and level == "waspada":
+        headline = "PERINGATAN DINI TSUNAMI — WASPADA"
+        instruction = ("Jauhi pantai dan tepi sungai/muara. Tidak perlu mengungsi ke bukit atau gedung tinggi. "
+                       "Tetap pantau informasi resmi; status bisa berubah.")
+    elif tsunami:
+        headline = "PERINGATAN DINI TSUNAMI" + (f" — {level.upper()}" if level in ("siaga", "awas") else "")
+        instruction = ("Segera menjauh dari pantai dan sungai, naik ke tempat tinggi. Bila tidak sempat, naik ke lantai "
+                       "atas gedung beton bertingkat yang ditunjukkan aplikasi. "
                        "Jangan menunggu air laut surut. Jangan kembali sampai peringatan dicabut.")
     else:
         headline = "INFO GEMPA"

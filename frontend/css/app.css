@@ -241,3 +241,26 @@ details.card li { margin-bottom: .35rem; }
 .spinner { width: 1.1rem; height: 1.1rem; border: 3px solid var(--line); border-top-color: var(--info); border-radius: 50%; display: inline-block; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Gedung evakuasi vertikal (tsunami) */
+.mk-gedung { min-width: 34px; height: 24px; padding: 0 5px; border-radius: 6px; border: 2px solid #fff; background: #6d28d9; color: #fff;
+  font: 700 12px/20px system-ui, sans-serif; box-shadow: 0 1px 4px rgba(0,0,0,.35); cursor: pointer; }
+.mk-gedung.ver { background: #166534; }
+.vbox { border: 2px solid #6d28d9; border-radius: 10px; padding: .7rem .8rem; background: #f5f3ff; color: #1f1147; }
+.vbox.ver { border-color: #166534; background: #f0fdf4; color: #052e16; }
+.vbox h3 { margin: 0 0 .25rem; font-size: 1rem; }
+.lvl { display: inline-block; padding: .1rem .45rem; border-radius: 6px; font-weight: 700; font-size: .85rem; }
+.lvl.waspada { background: #fef3c7; color: #78350f; }
+.lvl.siaga { background: #fed7aa; color: #7c2d12; }
+.lvl.awas { background: #fecaca; color: #7f1d1d; }
+.srcnote { font-size: .8rem; color: var(--muted, #4b5563); }
+.kv2 { display: grid; grid-template-columns: auto 1fr; gap: .2rem .8rem; margin: 0; }
+.kv2 dt { color: var(--muted, #4b5563); }
+.kv2 dd { margin: 0; }
+@media (prefers-color-scheme: dark) {
+  .vbox { background: #241a3d; color: #ede9fe; }
+  .vbox.ver { background: #0f2a1a; color: #dcfce7; }
+}
+.alert-overlay.waspada { background: #8a3b06; }
+.alert-overlay.waspada .btn { color: #7c2d12; }
+.alert-overlay.waspada.sim { background: repeating-linear-gradient(45deg, #8a3b06 0 24px, #7a3305 24px 48px); }

@@ -6,6 +6,10 @@ import { clockTime, timeAgo, remainingSeconds } from './core.js';
 
 const S = { area: null, meta: null, state: null, m: null, mode: null, tmp: null, offset: 0, html: {} };
 const STATUSES = ['kosong', 'agak_ramai', 'ramai', 'penuh', 'tutup'];
+const LEVEL_TXT = { waspada: 'Waspada (< 0,5 m)', siaga: 'Siaga (0,5–3 m)', awas: 'Awas (> 3 m)' };
+const STRUCT = { beton: 'Beton bertulang', baja: 'Rangka baja', bata: 'Bata tanpa rangka beton', ringan: 'Kayu / bambu / semi-permanen', tidak_tahu: 'Tidak tahu' };
+const ACCESS = { '24jam': 'Bisa dimasuki 24 jam', jam_kerja: 'Hanya jam kerja/ibadah', tidak: 'Tidak bisa dimasuki umum' };
+const SRC = { survey: 'Survei petugas', osm: 'OpenStreetMap (jumlah lantai)', osm_height: 'OpenStreetMap (tinggi)', google: 'Google Open Buildings 2.5D (perkiraan)', upload: 'Unggahan perencana', default: 'Tidak ada data' };
 const now = () => Date.now() + S.offset;
 const setHTML = (el, h) => { if (S.html[el.id] !== h) { el.innerHTML = h; S.html[el.id] = h; } };
 const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
@@ -27,6 +31,8 @@ function renderAlert() {
         <dt>Gempa</dt><dd>M${esc(Number(a.magnitude).toFixed(1).replace('.', ','))} · kedalaman ${esc(Math.round(a.depth_km ?? 0))} km</dd>
         <dt>Lokasi</dt><dd>${esc(a.region || '-')}</dd>
         <dt>Diterbitkan</dt><dd>${clockTime(a.issued_at)}</dd>
+        ${a.level ? `<dt>Tingkat</dt><dd>${esc(LEVEL_TXT[a.level] || a.level)}${a.wave_m ? ` · ± ${esc(a.wave_m)} m` : ''}</dd>` : ''}
+        ${S.state.scenario && a.level !== 'waspada' ? `<dt>Lantai aman dihitung untuk</dt><dd>tsunami ± ${esc(S.state.scenario.wave_m)} m${S.state.scenario.design ? ' (skenario rencana)' : ''}</dd>` : ''}
         ${a.tsunami && a.eta_min != null ? `<dt>Gelombang tiba</dt><dd id="etaLine">± ${clockTime(new Date(Date.parse(a.issued_at) + a.eta_min * 60000).toISOString())} ${rem != null ? (rem > 0 ? `(sisa ${mmss(rem)})` : '(sudah lewat)') : ''}</dd>` : ''}
       </dl>
       <p class="small" style="margin:0">Semua warga yang membuka SEMPAT menerima layar peringatan dan rute evakuasi.</p>
@@ -56,6 +62,11 @@ async function simulateDialog() {
       <label class="field grow">Jarak pusat gempa (km)<input type="number" name="dist" value="150" min="5" max="1500" required></label>
     </div>
     <label class="field">Perkiraan gelombang tiba (menit setelah gempa)<input type="number" name="eta" value="${eta}" min="1" max="240" required></label>
+    <fieldset class="radio-cards" style="border:0;padding:0;margin:0" id="lvlSet"><legend class="small muted" style="margin-bottom:.3rem">Tingkat ancaman (kategori BMKG)</legend>
+      <label><input type="radio" name="lvl" value="waspada"><span>Waspada — jauhi pantai, tanpa evakuasi</span></label>
+      <label><input type="radio" name="lvl" value="siaga"><span>Siaga — evakuasi</span></label>
+      <label><input type="radio" name="lvl" value="awas" checked><span>Awas — evakuasi penuh</span></label></fieldset>
+    <label class="field">Perkiraan tinggi tsunami di pantai (m, opsional)<input type="number" name="wave" min="0.1" max="40" step="0.1" placeholder="kosong = Siaga 3 m · Awas ${esc((S.meta && S.meta.params && S.meta.params.tsunami_design_height_m) || 10)} m (skenario rencana)"></label>
     <fieldset class="radio-cards" style="border:0;padding:0;margin:0"><legend class="small muted" style="margin-bottom:.3rem">Siapa yang menerima?</legend>
       <label><input type="radio" name="scope" value="area" ${S.area && S.area.meta.synthetic ? '' : 'checked'}><span>Warga di sekitar wilayah ini</span></label>
       <label><input type="radio" name="scope" value="all" ${S.area && S.area.meta.synthetic ? 'checked' : ''}><span>Semua HP pengguna SEMPAT (uji/demo)</span></label></fieldset>
@@ -70,7 +81,7 @@ async function simulateDialog() {
     ev.preventDefault();
     try {
       await api.post('/api/alerts/simulate', { tsunami: f.t.value === '1', magnitude: parseFloat(f.mag.value), distance_km: parseFloat(f.dist.value), eta_min: parseFloat(f.eta.value),
-        area_id: S.area.meta.id, scope: f.scope.value });
+        area_id: S.area.meta.id, scope: f.scope.value, level: f.lvl.value, wave_m: f.wave.value === '' ? null : parseFloat(f.wave.value) });
       d.close(); toast('Simulasi peringatan terkirim.');
       await S.sync.refresh();
     } catch (e) { d.querySelector('#simErr').textContent = e.message; }
@@ -179,7 +190,8 @@ function setMode(mode) {
   S.mode = mode;
   const b = $('#modeBanner');
   if (!mode) { b.classList.add('hidden'); b.innerHTML = ''; return; }
-  const txt = mode === 'point' ? 'Ketuk lokasi titik bantuan di peta' : mode === 'locate' ? 'Ketuk lokasi wilayah kerja di peta (peta jalan di sekitarnya akan diunduh)' : 'Ketuk ruas jalan yang putus atau terhalang';
+  const txt = mode === 'point' ? 'Ketuk lokasi titik bantuan di peta' : mode === 'locate' ? 'Ketuk lokasi wilayah kerja di peta (peta jalan di sekitarnya akan diunduh)'
+    : mode === 'survey' ? 'Ketuk gedung yang Anda survei (perbesar peta sampai bentuk gedung terlihat)' : 'Ketuk ruas jalan yang putus atau terhalang';
   b.innerHTML = `<span class="grow">${txt}</span>${mode === 'point' ? '<button class="btn" type="button" data-act="gps">Pakai GPS saya</button>' : ''}<button class="btn" type="button" data-act="cancelmode">Batal</button>`;
   b.classList.remove('hidden');
   $('#map').scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -228,9 +240,75 @@ async function areaDialog() {
   d.showModal();
 }
 
+// ------------------------------------------------------------------ survei gedung (evakuasi vertikal tsunami)
+function renderSurveyList() {
+  const el = $('#surveyList'); if (!el || !S.area) return;
+  const bl = S.area.buildings.filter((b) => b.kind !== 'rumah' && ((b.levels || 1) >= 2 || b.verified));
+  const ver = bl.filter((b) => b.verified).length;
+  const todo = bl.filter((b) => !b.verified).sort((a, b) => (b.levels - a.levels) || (b.hazard - a.hazard)).slice(0, 6);
+  setHTML(el, `<p class="small" style="margin:0">${ver} dari ${bl.length} gedung bertingkat sudah disurvei.${bl.length ? '' : ' Belum ada gedung bertingkat tercatat di peta wilayah ini — ketuk gedung di peta untuk menambah data.'}</p>
+    ${todo.length ? `<div class="small muted">Prioritas (paling tinggi, belum disurvei):</div>${todo.map((b) => `<button type="button" class="item" data-act="survey" data-id="${esc(b.id)}" style="text-align:left;cursor:pointer">
+      <span class="title">${esc(b.name || 'Gedung tanpa nama')}</span><span class="small muted">${b.levels} lantai · ${esc(SRC[b.levels_src] || b.levels_src)}${b.hazard ? ' · di zona bahaya' : ''}</span></button>`).join('')}` : ''}`);
+}
+
+async function surveyDialog(bid) {
+  let v;
+  try { v = await api.get(`/api/buildings/${encodeURIComponent(bid)}?area=${encodeURIComponent(S.area.meta.id)}`); } catch (e) { toast(e.message, true); return; }
+  const b = v.building, L = v.levels;
+  const row = (k) => `<tr><td>${esc(LEVEL_TXT[k])}</td><td>${L[k].depth_m > 0 ? `± ${esc(String(L[k].depth_m).replace('.', ','))} m` : '–'}</td><td>${L[k].suitable ? `<strong>Layak</strong> · lantai ${L[k].min_floor}+` : esc(L[k].reason || 'Tidak tergenang')}</td></tr>`;
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form class="dlg" method="dialog">
+    <h2>Survei gedung: ${esc(b.name || 'tanpa nama')}</h2>
+    <p class="small muted" style="margin:0">Data saat ini: ${esc(b.levels)} lantai — ${esc(SRC[b.levels_src] || b.levels_src)}${b.height_m ? ` (tinggi ± ${esc(b.height_m)} m)` : ''} · tanah ± ${esc(Math.round(b.elev))} m${b.hazard ? ' · zona bahaya' : ''}</p>
+    <table class="small" style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left">Tingkat</th><th style="text-align:left">Genangan</th><th style="text-align:left">Evakuasi vertikal</th></tr></thead>
+      <tbody>${row('waspada')}${row('siaga')}${row('awas')}</tbody></table>
+    <p class="small muted" style="margin:0">Awas memakai skenario rencana ± ${esc(v.design_m)} m. Lantai minimum: genangan 2 m → lantai 3, 3 m → lantai 4 (pedoman Jepang).</p>
+    <div class="row">
+      <label class="field grow">Jumlah lantai di atas tanah<input type="number" name="levels" min="1" max="200" value="${esc(b.levels)}" required></label>
+      <label class="field grow">Lantai basement<input type="number" name="basement" min="0" max="10" value="${esc(b.basement || 0)}"></label>
+    </div>
+    <fieldset class="radio-cards" style="border:0;padding:0;margin:0"><legend class="small muted" style="margin-bottom:.3rem">Struktur utama</legend>
+      ${Object.entries(STRUCT).map(([k, t]) => `<label><input type="radio" name="st" value="${k}" ${(b.structure || 'tidak_tahu') === k ? 'checked' : ''}><span>${esc(t)}</span></label>`).join('')}</fieldset>
+    <fieldset class="radio-cards" style="border:0;padding:0;margin:0"><legend class="small muted" style="margin-bottom:.3rem">Akses ke lantai atas saat darurat</legend>
+      ${Object.entries(ACCESS).map(([k, t]) => `<label><input type="radio" name="ac" value="${k}" ${(b.access || '24jam') === k ? 'checked' : ''}><span>${esc(t)}</span></label>`).join('')}</fieldset>
+    <div class="row">
+      <label class="check"><input type="checkbox" name="roof" ${b.roof ? 'checked' : ''}> Atap datar bisa dipakai</label>
+      <label class="check"><input type="checkbox" name="slf" ${b.slf ? 'checked' : ''}> Punya Sertifikat Laik Fungsi (SLF)</label>
+    </div>
+    <label class="field">Catatan (opsional)<input type="text" name="note" maxlength="200" value="${esc((b.survey && b.survey.note) || '')}" placeholder="contoh: tangga darurat di sisi timur, kunci dipegang marbot"></label>
+    <p class="small muted" style="margin:0">Bangunan kayu/bata tanpa rangka beton dan gedung yang tidak bisa dimasuki tidak akan disarankan ke warga.</p>
+    <p class="small" role="alert" id="svErr" style="color:var(--danger)"></p>
+    <div class="actions">${b.verified ? '<button class="btn ghost" type="button" data-clear>Hapus survei</button>' : ''}<button class="btn" type="button" data-x>Batal</button><button class="btn primary" type="submit">Simpan survei</button></div>
+  </form>`;
+  document.body.appendChild(d);
+  const f = d.querySelector('form');
+  d.querySelector('[data-x]').onclick = () => d.close();
+  d.addEventListener('close', () => d.remove());
+  const clr = d.querySelector('[data-clear]');
+  if (clr) clr.onclick = async () => {
+    try { await api.del(`/api/buildings/${encodeURIComponent(bid)}/survey?area=${encodeURIComponent(S.area.meta.id)}`); d.close(); toast('Survei dihapus.'); } catch (e) { $('#svErr', d).textContent = e.message; }
+  };
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      const r = await api.put(`/api/buildings/${encodeURIComponent(bid)}`, { area_id: S.area.meta.id, levels: parseInt(f.levels.value, 10), basement: parseInt(f.basement.value || '0', 10),
+        structure: f.st.value, access: f.ac.value, roof: f.roof.checked, slf: f.slf.checked, note: f.note.value.trim() });
+      d.close();
+      const lv = r.levels;
+      toast(lv.awas.suitable ? `Tersimpan. Layak evakuasi vertikal (Awas: lantai ${lv.awas.min_floor}+).` : lv.siaga.suitable ? `Tersimpan. Layak untuk Siaga (lantai ${lv.siaga.min_floor}+), tidak untuk Awas.` : `Tersimpan. Tidak disarankan untuk evakuasi vertikal: ${lv.awas.reason || lv.siaga.reason}`, false, 6000);
+    } catch (e) { $('#svErr', d).textContent = e.message; }
+  };
+  d.showModal();
+}
+
 async function onMapClick(ev) {
   const pos = { lat: ev.lngLat.lat, lon: ev.lngLat.lng };
   if (S.mode === 'locate') { setMode(null); locateArea(pos.lat, pos.lon); return; }
+  if (S.mode === 'survey') {
+    const bid = S.m.buildingAt(ev.point);
+    if (!bid) { toast('Tidak ada gedung di titik itu. Perbesar peta lalu ketuk bentuk gedung.', true); return; }
+    setMode(null); surveyDialog(bid); return;
+  }
   if (S.mode === 'point') {
     setMode(null);
     S.tmp = new maplibregl.Marker({ color: '#1d4ed8' }).setLngLat([pos.lon, pos.lat]).addTo(S.m.map);
@@ -265,6 +343,8 @@ async function onAction(act, el) {
   else if (act === 'endalert') endAlert();
   else if (act === 'addpoint') setMode('point');
   else if (act === 'addclosure') setMode('closure');
+  else if (act === 'surveymode') setMode('survey');
+  else if (act === 'survey') surveyDialog(id);
   else if (act === 'cancelmode') setMode(null);
   else if (act === 'area') areaDialog();
   else if (act === 'gps') {
@@ -326,6 +406,7 @@ async function startDash(user) {
       S.m.setOfficial(area.official_points);
       S.m.setFacilities(area.facilities || []);
       renderQR();
+      renderSurveyList();
     },
     onState: (st) => {
       if (S.area && st.area_id !== S.area.meta.id) return;

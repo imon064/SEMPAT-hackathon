@@ -27,7 +27,11 @@ const S = {
   route: null, posko: null, poskoPos: null, poskoAt: 0, poskoBusy: false, poskoOffline: false,
   heading: null, online: true, offset: 0, walking: null, phase: null, html: {},
   quake: null, pushSub: null, pushMsg: '',
+  vertical: false, amanRoute: null, gedungRoute: null, gedungKey: '',
 };
+const LEVEL_TXT = { waspada: 'WASPADA · < 0,5 m', siaga: 'SIAGA · 0,5–3 m', awas: 'AWAS · > 3 m' };
+const SRC_TXT = { survey: 'diverifikasi petugas', osm: 'jumlah lantai dari OpenStreetMap', osm_height: 'tinggi dari OpenStreetMap',
+  google: 'tinggi perkiraan satelit (Google Open Buildings)', upload: 'data tinggi gedung dari perencana' };
 const now = () => Date.now() + S.offset;
 
 // ------------------------------------------------------------------ utilitas
@@ -64,6 +68,9 @@ function zoneAt(pos) {
 // ------------------------------------------------------------------ fase
 function computePhase() {
   const a = S.state && S.state.alert;
+  const a0 = activeAlert();
+  // BMKG Waspada (< 0,5 m): cukup menjauhi pantai/sungai, tidak mengungsi ke tempat tinggi.
+  if (a0 && a0.level === 'waspada' && !S.selfEvac) return 'WASPADA';
   const key = evacKey();
   if (key) {
     if (S.manualSafe === key) return 'AMAN';
@@ -127,7 +134,7 @@ function trimRoute(coords, pos) {
 }
 
 function computeRoute() {
-  S.route = null;
+  S.route = null; S.amanRoute = null; S.gedungRoute = null;
   if (!areaReady() || !S.tables || S.tables.area_id !== S.area.meta.id) return;
   if (S.target) {
     let r = null;
@@ -144,7 +151,26 @@ function computeRoute() {
     S.route = r;
     return;
   }
-  if (S.phase === 'EVAKUASI' || S.preview) S.route = routeFromTable(S.area, S.idx, S.tables, 'aman', S.group, S.pos);
+  if (S.phase === 'EVAKUASI' || S.preview) {
+    S.route = S.amanRoute = routeFromTable(S.area, S.idx, S.tables, 'aman', S.group, S.pos);
+    // Pilihan terakhir: gedung beton bertingkat terdekat yang cukup tinggi untuk skenario tsunami saat ini.
+    const hasG = S.tables.tables && S.tables.tables[`gedung-${S.group}`];
+    S.gedungRoute = S.phase === 'EVAKUASI' && hasG ? routeFromTable(S.area, S.idx, S.tables, 'gedung', S.group, S.pos) : null;
+    if (S.vertical && S.gedungRoute && S.gedungRoute.ok && S.gedungRoute.dest.type !== 'safe_zone') S.route = { ...S.gedungRoute, vertical: true };
+  }
+}
+
+// Apakah perlu menawarkan gedung (tidak sempat ke tanah tinggi, atau waktu tiba tidak diketahui)?
+function verticalOffer() {
+  const g = S.gedungRoute, r = S.amanRoute;
+  if (S.phase !== 'EVAKUASI' || S.target || !g || !g.ok || g.dest.type === 'safe_zone') return null;
+  if (r && r.ok && g.timeS >= r.timeS - 30) return null;  // tanah tinggi sama cepatnya: tetap ke sana
+  const a = activeAlert();
+  const rem = a ? remainingSeconds(a, now()) : null;
+  const late = !r || !r.ok || (rem != null && r.timeS > rem - 60);
+  if (late) return { strong: true, g, rem };
+  if (rem == null) return { strong: false, g, rem };
+  return null;
 }
 
 async function refreshPosko(force = false) {
@@ -182,6 +208,7 @@ function onPhaseChange(prev, ph) {
     refreshPosko(true);
   }
   if (ph === 'EVAKUASI') { S.preview = false; S.target = null; S.follow = true; if (S.pos && S.m) S.m.follow(S.pos, 16); }
+  if (ph !== 'EVAKUASI' && ph !== 'AMAN') S.vertical = false;
   if (ph === 'PEMULIHAN' || ph === 'INFO' || ph === 'AMAN') refreshPosko(true);
 }
 
@@ -189,7 +216,7 @@ function detectArrival() {
   if (S.atShelter && S.pos && haversine(S.pos.lat, S.pos.lon, S.atShelter.lat, S.atShelter.lon) > 80) S.atShelter = null;
   const r = S.route;
   if (!r || !r.ok || !S.pos) return;
-  if (S.phase === 'EVAKUASI' && r.dest.type === 'shelter' && r.distM < 20) {
+  if (S.phase === 'EVAKUASI' && ['shelter', 'gedung', 'tanah_tinggi'].includes(r.dest.type) && r.distM < 20) {
     S.atShelter = r.dest; S.phase = computePhase(); onPhaseChange('EVAKUASI', S.phase); computeRoute();
   }
   if (S.target && !S.target.arrived && r.distM < 20) {
@@ -251,6 +278,7 @@ function renderState() {
     const sim = a && a.source === 'SIMULASI';
     h = `<div class="state-title">${icon('warning')} ${a ? esc(a.headline || 'PERINGATAN DINI TSUNAMI') : 'MODE EVAKUASI MANDIRI'}</div>
       ${sim ? `<p><span class="tag sim-dark">SIMULASI${a.self ? ' DI LOKASI ANDA' : ''} — bukan kejadian nyata</span></p>` : ''}
+      ${a && a.level ? `<p><span class="lvl ${esc(a.level)}">${esc(LEVEL_TXT[a.level] || a.level)}</span>${a.wave_m ? ` <span class="small">perkiraan tinggi ± ${esc(String(a.wave_m).replace('.', ','))} m</span>` : ''}</p>` : ''}
       <p><strong>Pergi sekarang ke tempat tinggi. Jauhi pantai dan sungai.</strong> Jangan menunggu air laut surut. Jangan kembali sampai peringatan dicabut.</p>
       ${a ? `<p class="small muted">${esc(alertLine(a))} · ${esc(a.source === 'BMKG' ? 'Sumber: BMKG' : a.source)}</p>` : '<p class="small muted">Anda memulai evakuasi karena merasakan gempa kuat. Ini langkah yang benar.</p>'}
       ${!S.pos || S.locating ? `<p><strong>${S.locating ? 'Menyiapkan peta di sekitar Anda…' : 'Lokasi belum diketahui.'}</strong> Sementara itu: berjalan menjauhi pantai, naik ke tanah setinggi mungkin atau lantai 3 ke atas gedung beton yang kokoh.</p>` : ''}
@@ -262,13 +290,27 @@ function renderState() {
     const z = zoneAt(S.pos);
     h = `<div class="state-title">${icon('check')} ${z && z.safe && !S.route ? 'Lokasi Anda aman dari tsunami' : 'Anda di tempat aman'}</div>
       ${a && a.source === 'SIMULASI' ? `<p><span class="tag sim-dark">SIMULASI${a.self ? ' DI LOKASI ANDA' : ''}</span></p>` : ''}
-      ${inShelter ? `<p><strong>Naik ke lantai teratas ${esc(inShelter.name)}${inShelter.levels ? ` (lantai ${inShelter.levels})` : ''}.</strong> Jangan turun sampai peringatan dicabut.</p>`
+      ${inShelter && inShelter.type === 'tanah_tinggi' ? `<p><strong>Anda di tanah lebih tinggi dari perkiraan tsunami (± ${esc(Math.round(inShelter.elev))} m).</strong> Bila masih bisa, terus naik atau menjauh dari pantai dan sungai. Jangan turun sampai peringatan dicabut.</p>`
+        : inShelter ? `<p><strong>Naik minimal ke lantai ${esc(inShelter.min_floor || 3)} ${esc(inShelter.name)} — lebih tinggi lebih baik${inShelter.levels ? ` (gedung ${inShelter.levels} lantai)` : ''}.</strong> Jangan ke basement. Jangan turun sampai peringatan dicabut.</p>`
         : '<p><strong>Tetap di sini sampai peringatan dicabut.</strong> Jangan kembali ke pantai atau rumah dulu — gelombang bisa datang lebih dari sekali.</p>'}
       ${zoneHTML()}
       <p class="small muted">Butuh bantuan medis, air, atau tempat berteduh? Lihat posko terdekat di bawah.</p>
       <div class="row">${S.manualSafe === evacKey() ? '<button class="btn" data-act="unsafe">Ternyata saya belum aman</button>' : ''}
       ${a && a.self ? '<button class="btn" data-act="endsim">Akhiri simulasi</button>' : ''}
       ${!a && S.selfEvac ? '<button class="btn" data-act="endself">Akhiri mode evakuasi mandiri</button>' : ''}</div>`;
+  } else if (ph === 'WASPADA') {
+    cls = 'warn';
+    const z = zoneAt(S.pos);
+    const sim = a && a.source === 'SIMULASI';
+    const near = z && z.coast < 1e8 ? ` Anda ± ${esc(fmtDistance(z.coast))} dari pantai.` : '';
+    h = `<div class="state-title">${icon('warning')} ${esc(a.headline || 'PERINGATAN DINI TSUNAMI — WASPADA')}</div>
+      ${sim ? `<p><span class="tag sim-dark">SIMULASI${a.self ? ' DI LOKASI ANDA' : ''} — bukan kejadian nyata</span></p>` : ''}
+      <p><span class="lvl waspada">${LEVEL_TXT.waspada}</span></p>
+      <p><strong>Jauhi pantai dan tepi sungai/muara sekarang.</strong> Tidak perlu mengungsi ke bukit atau gedung tinggi.${near}</p>
+      <p>Pantau informasi resmi — status bisa naik menjadi Siaga/Awas.</p>
+      <p class="small muted">${esc(alertLine(a))} · ${esc(a.source === 'BMKG' ? 'Sumber: BMKG' : a.source)}</p>
+      ${a.self ? '<button class="btn" data-act="endsim">Akhiri simulasi</button>' : ''}
+      ${STEP0('Merasakan gempa kuat atau lama?')}`;
   } else if (ph === 'INFO') {
     cls = 'warn';
     h = `<div class="state-title">${icon('info')} Info gempa — tidak berpotensi tsunami</div>
@@ -335,6 +377,7 @@ function renderNav() {
     setVerdict(null);
     if (S.target) actions.push('<button class="btn" data-act="stoptarget">Kembali</button>');
     setHTML($('#navActions'), actions.join(''));
+    renderVertical();
     return;
   }
   if (S.target && S.target.arrived) {
@@ -358,7 +401,12 @@ function renderNav() {
   $('#navTurn').textContent = t && t.distM < r.distM - 15 ? `Belok ${t.dir} dalam ${fmtDistance(t.distM)}` : 'Lurus terus sampai tujuan';
   const d = r.dest;
   let dest;
-  if (d.type === 'shelter') dest = `Tujuan: <strong>${esc(d.name)}</strong> — gedung evakuasi, naik ke lantai ${d.levels || 'teratas'}.`;
+  if (d.type === 'tanah_tinggi') {
+    dest = `Tujuan: <strong>tanah lebih tinggi terdekat</strong> (± ${esc(Math.round(d.elev))} m) — di atas perkiraan tsunami + galat peta. Pilihan darurat: terus naik bila bisa.`;
+  } else if (d.type === 'shelter' || d.type === 'gedung') {
+    dest = `Tujuan: <strong>${esc(d.name)}</strong> — ${d.type === 'shelter' ? 'gedung evakuasi resmi' : 'gedung bertingkat (pilihan darurat)'}, <strong>naik minimal ke lantai ${esc(d.min_floor || 3)}</strong>${d.levels ? ` dari ${d.levels} lantai` : ''}. Jangan ke basement.
+      <br><span class="srcnote">${d.verified ? 'Diverifikasi petugas' : `Belum diverifikasi petugas — ${esc(SRC_TXT[d.levels_src] || 'data peta')}`}</span>`;
+  }
   else if (d.type === 'safe_zone') dest = `Tujuan: <strong>tempat aman</strong>${d.elev != null ? ` (ketinggian ± ${Math.round(d.elev)} m)` : ''} — terus naik bila masih bisa.`;
   else dest = `Tujuan: <strong>${esc(d.name)}</strong> · ${esc(KIND_LABEL[d.kind] || '')} <span class="chip ${esc(d.status)}">${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
   $('#navDest').innerHTML = dest;
@@ -374,6 +422,34 @@ function renderNav() {
   }
   if (S.phase === 'EVAKUASI') actions.push('<button class="btn" data-act="manualsafe">Saya sudah di tempat aman</button>');
   setHTML($('#navActions'), actions.join(''));
+  renderVertical();
+}
+
+function renderVertical() {
+  const el = $('#navVertical');
+  if (S.vertical && S.route && S.route.vertical) {
+    const hg = S.route.dest.type === 'tanah_tinggi';
+    setHTML(el, `<div class="vbox"><h3>${hg ? 'Menuju tanah lebih tinggi' : 'Menuju gedung'} — pilihan darurat</h3>
+      <p class="small" style="margin:0 0 .4rem">${hg ? 'Hanya bila tidak sempat ke zona aman. Setelah sampai, terus naik bila masih bisa.' : 'Hanya bila tidak sempat ke tanah tinggi. Begitu sampai, langsung naik tangga — jangan pakai lift.'}</p>
+      <button class="btn" data-act="vertical-off">Kembali ke rute tanah tinggi</button></div>`);
+    return;
+  }
+  const o = verticalOffer();
+  if (!o) { setHTML(el, ''); return; }
+  const d = o.g.dest;
+  if (d.type === 'tanah_tinggi') {
+    setHTML(el, `<div class="vbox"><h3>${o.strong ? 'Tidak sempat ke tempat aman?' : 'Pilihan darurat bila waktu habis'}</h3>
+      <p style="margin:0"><strong>Tanah lebih tinggi terdekat</strong> (± ${esc(Math.round(d.elev))} m) · ± ${esc(fmtMinutes(o.g.timeS))} · ${esc(fmtDistance(o.g.distM))}</p>
+      <p class="srcnote" style="margin:.2rem 0 .5rem">Di atas perkiraan tsunami ± ${esc(String(S.tables.scenario ? S.tables.scenario.wave_m : '').replace('.', ','))} m ditambah galat peta ketinggian. Tidak ada gedung layak yang lebih dekat.</p>
+      <button class="btn ${o.strong ? 'danger' : ''}" data-act="vertical-on">${icon('arrow')} Arahkan ke sana</button></div>`);
+    return;
+  }
+  const src = d.verified ? 'Diverifikasi petugas' : `Belum diverifikasi petugas (${esc(SRC_TXT[d.levels_src] || 'data peta')}) — periksa kondisi gedung`;
+  setHTML(el, `<div class="vbox ${d.verified ? 'ver' : ''}"><h3>${o.strong ? 'Tidak sempat ke tanah tinggi?' : 'Pilihan darurat bila waktu habis'}</h3>
+    <p style="margin:0"><strong>${esc(d.name)}</strong> · ± ${esc(fmtMinutes(o.g.timeS))} · ${esc(fmtDistance(o.g.distM))}</p>
+    <p style="margin:.2rem 0"><strong>Naik minimal ke lantai ${esc(d.min_floor)}</strong> (gedung ${esc(d.levels)} lantai). Lebih tinggi lebih baik.</p>
+    <p class="srcnote" style="margin:0 0 .5rem">${src}</p>
+    <button class="btn ${o.strong ? 'danger' : ''}" data-act="vertical-on">${icon('arrow')} Arahkan ke gedung ini</button></div>`);
 }
 
 function setVerdict(routeS, hide = false, text = null) {
@@ -384,6 +460,10 @@ function setVerdict(routeS, hide = false, text = null) {
   const a = activeAlert();
   const rem = a ? remainingSeconds(a, now()) : null;
   const vd = routeS == null ? { level: 'unknown', text: 'Rute belum tersedia.' } : verdict(routeS, rem);
+  if (S.route && S.route.vertical && rem != null) {
+    if (vd.level === 'late' && rem > 0) vd.text = 'Waktu sangat mepet. Bila gelombang terlihat, masuk gedung beton terdekat mana pun dan naik setinggi mungkin.';
+    else if (vd.level === 'ok') vd.text = 'Anda diperkirakan sempat sampai. Terus bergerak, lalu naik.';
+  }
   v.className = `verdict ${vd.level}`;
   v.innerHTML = `${icon(vd.level === 'ok' ? 'check' : vd.level === 'unknown' ? 'info' : 'warning')}<span>${esc(vd.text)}</span>`;
 }
@@ -487,6 +567,17 @@ function renderMap() {
   const showRoute = areaReady() && r && r.ok && (S.phase === 'EVAKUASI' || S.preview || S.target);
   m.setRoute(showRoute ? r.coords : null);
   m.setDest(showRoute ? r.dest : null);
+  // Gedung evakuasi darurat di sekitar (maks. 15 terdekat, 2 km) selama evakuasi.
+  let list = [];
+  if (S.phase === 'EVAKUASI' && areaReady() && S.tables && S.tables.dests && S.tables.dests.gedung) {
+    list = S.tables.dests.gedung.filter((g) => g.lat != null).map((g) => ({ g, d: haversine(S.pos.lat, S.pos.lon, g.lat, g.lon) }))
+      .filter((x) => x.d < 2000).sort((a, b) => a.d - b.d).slice(0, 15).map((x) => x.g);
+  }
+  const key = list.map((g) => `${g.id}:${g.min_floor}`).join(',');
+  if (key !== S.gedungKey) {
+    S.gedungKey = key;
+    m.setGedung(list, (g) => popup({ ...g, kind: null }, `<br>Naik minimal ke <strong>lantai ${esc(g.min_floor)}</strong> (gedung ${esc(g.levels)} lantai)<br><span style="color:#4b5563">${g.verified ? 'Diverifikasi petugas' : esc('Belum diverifikasi — ' + (SRC_TXT[g.levels_src] || 'data peta'))}</span>`));
+  }
 }
 
 function popup(p, extra = '') {
@@ -502,8 +593,9 @@ function maybeOverlay() {
   if (!(a && S.ack !== a.id)) { ov.classList.add('hidden'); return; }
   if (!ov.classList.contains('hidden') && ov.dataset.id === a.id) return;
   const sim = a.source === 'SIMULASI';
+  const wsp = a.level === 'waspada';
   ov.dataset.id = a.id;
-  ov.className = 'alert-overlay' + (sim ? ' sim' : '');
+  ov.className = 'alert-overlay' + (sim ? ' sim' : '') + (wsp ? ' waspada' : '');
   ov.innerHTML = `
     ${sim ? `<span class="tag sim">SIMULASI${a.self ? ' DI LOKASI ANDA' : ''} — BUKAN KEJADIAN NYATA</span>` : ''}
     <h1 id="ovTitle">${icon('warning')} ${esc(a.headline || 'PERINGATAN DINI TSUNAMI')}</h1>
@@ -511,7 +603,8 @@ function maybeOverlay() {
     <p class="action" id="ovAction">${esc(a.instruction || 'Segera menjauh dari pantai dan naik ke tempat tinggi.')}</p>
     ${a.eta_min != null ? `<p class="meta">Perkiraan gelombang tiba ± pukul <strong>${etaClock(a)}</strong> (± ${Math.round(a.eta_min)} menit setelah gempa).</p>` : ''}
     <span class="source">${esc(a.source === 'BMKG' ? 'Sumber: BMKG' : 'Sumber: simulasi/latihan')}</span>
-    <button class="btn xl block" id="ovGo">${icon('arrow')} Tunjukkan jalan ke tempat aman</button>`;
+    ${a.level ? `<p class="meta"><strong>Tingkat: ${esc(LEVEL_TXT[a.level] || a.level)}</strong></p>` : ''}
+    <button class="btn xl block" id="ovGo">${wsp ? `${icon('check')} Saya mengerti — menjauh dari pantai` : `${icon('arrow')} Tunjukkan jalan ke tempat aman`}</button>`;
   $('#ovGo').onclick = () => {
     S.ack = a.id; store.set('sempat_ack', a.id);
     ov.classList.add('hidden');
@@ -522,8 +615,8 @@ function maybeOverlay() {
     $('#navCard').scrollIntoView({ block: 'start' });
   };
   $('#ovGo').focus();
-  vibrate([700, 250, 700, 250, 700]);
-  siren();
+  vibrate(wsp ? [400, 200, 400] : [700, 250, 700, 250, 700]);
+  if (!wsp) siren();
 }
 
 function vibrate(p) { try { navigator.vibrate && navigator.vibrate(p); } catch { /* abaikan */ } }
@@ -674,7 +767,7 @@ async function onAction(act, el) {
     try { await api.post('/api/push/test', { endpoint: S.pushSub.endpoint }); toast('Notifikasi uji dikirim. Cek bilah notifikasi HP.'); }
     catch (e) { toast(e.message, true); }
   } else if (act === 'manualsafe') {
-    const ok = await confirmDialog({ title: 'Sudah di tempat aman?', body: '<p>Pastikan Anda di tanah tinggi jauh dari pantai dan sungai, atau di lantai 3 ke atas gedung beton kokoh.</p>', okText: 'Ya, saya sudah aman' });
+    const ok = await confirmDialog({ title: 'Sudah di tempat aman?', body: '<p>Pastikan Anda di tanah tinggi jauh dari pantai dan sungai, atau di lantai atas gedung beton kokoh (minimal lantai yang ditunjukkan SEMPAT).</p>', okText: 'Ya, saya sudah aman' });
     if (!ok) return;
     S.manualSafe = evacKey(); store.set('sempat_manualsafe', S.manualSafe); stopWalk();
   } else if (act === 'unsafe') {
@@ -684,6 +777,10 @@ async function onAction(act, el) {
     S.preview = false;
     await refreshPosko(true);
     $('#navCard').scrollIntoView({ block: 'start' });
+  } else if (act === 'vertical-on') {
+    S.vertical = true; S.follow = true; if (S.pos && S.m) S.m.follow(S.pos, 17);
+  } else if (act === 'vertical-off') {
+    S.vertical = false;
   } else if (act === 'stoptarget') {
     S.target = null; stopWalk();
   } else if (act === 'usegps') { setSource('gps'); return; }
@@ -831,7 +928,7 @@ async function main() {
   }
   setInterval(() => {
     if (S.simPending) { if (Date.now() >= S.simPending.fireAt) fireSim(S.simPending.sim, S.simPending.push); else renderState(); }
-    if (S.phase === 'EVAKUASI' || S.phase === 'AMAN') { renderCountdown(); if (S.phase === 'EVAKUASI' && S.route) setVerdict(S.route.ok ? S.route.timeS : null); }
+    if (S.phase === 'EVAKUASI' || S.phase === 'AMAN') { renderCountdown(); if (S.phase === 'EVAKUASI' && S.route) { setVerdict(S.route.ok ? S.route.timeS : null); renderVertical(); } }
     if (S.localSim && !S.simPending && Date.parse(S.localSim.issued_at) <= now() && S.phase === 'NORMAL') { maybeOverlay(); update(); }
   }, 1000);
   setInterval(() => { if (S.target || ['AMAN', 'PEMULIHAN', 'INFO'].includes(S.phase)) refreshPosko(); }, 15000);

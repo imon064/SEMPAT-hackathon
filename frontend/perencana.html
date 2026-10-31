@@ -45,6 +45,9 @@
         <div class="range"><div class="lbl"><label for="margin">Margin keselamatan</label><output id="marginV"></output></div>
           <input type="range" id="margin" min="0" max="10" step="1" value="2"></div>
         <p style="margin:0">Waktu untuk berjalan: <strong id="budgetV">–</strong></p>
+        <div class="range"><div class="lbl"><label for="wave">Tinggi tsunami rencana di pantai</label><output id="waveV"></output></div>
+          <input type="range" id="wave" min="1" max="20" step="0.5"></div>
+        <p class="small muted" style="margin:0">Menentukan gedung mana yang cukup tinggi: lantai aman = genangan (tinggi tsunami − ketinggian tanah) dibulatkan ke atas + 1. Pakai tinggi dari kajian risiko BPBD/InaRISK bila ada.</p>
         <div class="range"><div class="lbl"><label for="k">Cari gedung tambahan sebagai shelter vertikal</label><output id="kV"></output></div>
           <input type="range" id="k" min="0" max="10" step="1" value="5"></div>
         <label class="check"><input type="checkbox" id="useReg" checked> Hitung shelter yang sudah terdaftar</label>
@@ -74,6 +77,20 @@
         <div class="list" id="regList"></div>
       </section>
 
+      <section class="card stack no-print" aria-labelledby="dgTitle">
+        <h2 id="dgTitle" style="margin:0">Data gedung &amp; peta bahaya</h2>
+        <div id="dgSummary" class="small"></div>
+        <div class="stack" style="gap:.5rem">
+          <label class="field">Peta bahaya tsunami resmi (GeoJSON poligon, WGS84)
+            <input type="file" id="hazFile" accept=".geojson,.json,application/geo+json,application/json"></label>
+          <label class="field">Tinggi gedung (GeoJSON; properti <code>height</code> dalam meter atau <code>levels</code>)
+            <input type="file" id="hgtFile" accept=".geojson,.json,application/geo+json,application/json"></label>
+          <div class="row"><button class="btn" type="button" data-act="ee">Ambil tinggi dari Google Open Buildings (Earth Engine)</button></div>
+          <p class="small muted" style="margin:0">Tanpa akun server Earth Engine: jalankan <code>tools/ee_export_heights.js</code> di code.earthengine.google.com dengan batas area <code id="bboxTxt"></code>, unduh GeoJSON-nya, lalu unggah di atas.</p>
+          <p class="small" id="dgMsg" role="status" style="margin:0"></p>
+        </div>
+      </section>
+
       <section class="card stack" id="infoCard" aria-labelledby="infoTitle">
         <h2 id="infoTitle" style="margin:0">Panduan per titik</h2>
         <p class="muted" id="infoEmpty" style="margin:0">Klik rumah atau titik mana pun di peta untuk membuat panduan evakuasi yang bisa dicetak dan ditempel, lengkap dengan kode QR.</p>
@@ -95,6 +112,8 @@
         <span><i class="swatch box" style="background:#1e3a8a"></i>Shelter terdaftar</span>
         <span><i class="swatch box" style="background:#7c3aed"></i>Rekomendasi</span>
         <span><i class="swatch box" style="background:#d1d5db"></i>Bukan hunian</span>
+        <span><i class="swatch box" style="background:#c7d2fe"></i>Gedung bertingkat (kandidat)</span>
+        <span><i class="swatch" style="background:#166534"></i>Sudah disurvei petugas</span>
       </div>
     </div>
   </div>

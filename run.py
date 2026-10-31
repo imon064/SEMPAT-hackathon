@@ -32,8 +32,15 @@ if sys.version_info < (3, 10):
 def ensure_synthetic(force: bool = False) -> Path:
     from backend import synthetic
     from backend.config import AREAS_DIR
+    from backend.area_builder import AREA_SCHEMA
     out = AREAS_DIR / synthetic.AREA_ID / "area.json"
-    if force or not out.exists():
+    stale = False
+    if out.exists() and not force:
+        try:
+            stale = json.loads(out.read_text(encoding="utf-8"))["meta"].get("schema", 1) < AREA_SCHEMA
+        except Exception:
+            stale = True
+    if force or stale or not out.exists():
         print("Membangun desa sintetis untuk uji sistem ...")
         area = synthetic.build()
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -152,6 +152,70 @@ let SERVER = null;
   await w.waitForFunction(() => document.querySelector('#stateCard').textContent.includes('dicabut'), null, { timeout: 8000 });
   ok(true, 'warga: peringatan dicabut tampil');
 
+  // ---- SIAGA, waktu tiba sangat singkat -> warga di dekat pantai ditawari gedung bertingkat
+  await p.click('[data-act=simulate]');
+  await p.waitForSelector('dialog form');
+  await p.check('dialog input[name=scope][value=all]');
+  await p.check('dialog input[name=lvl][value=siaga]');
+  await p.fill('dialog input[name=eta]', '2');
+  await p.click('dialog button[type=submit]');
+  await w.waitForSelector('#overlay:not(.hidden)', { timeout: 10000 });
+  ok((await w.textContent('#overlay')).includes('SIAGA'), 'warga: tingkat SIAGA tampil di layar peringatan');
+  await w.click('#ovGo');
+  await w.waitForFunction(() => window.__sempat.S.tables && window.__sempat.S.tables.scenario && window.__sempat.S.tables.scenario.wave_m === 3, null, { timeout: 10000 });
+  const g0 = await w.evaluate(() => (window.__sempat.S.tables.dests.gedung || [])[0]);
+  ok(g0 && g0.min_floor >= 2, `warga: ada gedung layak untuk Siaga (${g0 && g0.name}, lantai ${g0 && g0.min_floor}+)`);
+  await wctx.setGeolocation({ latitude: g0.lat - 0.0004, longitude: g0.lon + 0.0002, accuracy: 10 });
+  await w.waitForSelector('#navVertical .vbox', { timeout: 10000 });
+  ok((await w.textContent('#navVertical')).includes('lantai'), 'warga: tidak sempat ke tanah tinggi -> ditawari gedung + lantai minimum');
+  ok(await w.locator('.mk-gedung').count() > 0, 'warga: gedung evakuasi darurat tampil di peta (label L2+/L3+)');
+  await w.click('[data-act=vertical-on]');
+  await w.waitForFunction(() => window.__sempat.S.route && window.__sempat.S.route.vertical, null, { timeout: 5000 });
+  ok((await w.textContent('#navDest')).includes('naik minimal ke lantai'), 'warga: rute ke gedung dengan instruksi lantai');
+  await w.evaluate(() => document.querySelector('#navCard').scrollIntoView({ block: 'start' }));
+  await shot(w, '08b_warga_siaga_gedung');
+  await p.click('[data-act=endalert]');
+  await p.waitForSelector('dialog textarea');
+  await p.fill('dialog textarea', 'Latihan siaga selesai');
+  await p.click('dialog button[value=ok]');
+  await w.waitForFunction(() => window.__sempat.S.phase !== 'EVAKUASI', null, { timeout: 8000 });
+
+  // ---- WASPADA: hanya menjauhi pantai, tidak ada rute evakuasi
+  await p.click('[data-act=simulate]');
+  await p.waitForSelector('dialog form');
+  await p.check('dialog input[name=scope][value=all]');
+  await p.check('dialog input[name=lvl][value=waspada]');
+  await p.click('dialog button[type=submit]');
+  await w.waitForSelector('#overlay:not(.hidden)', { timeout: 10000 });
+  ok((await w.textContent('#overlay')).includes('WASPADA'), 'warga: peringatan WASPADA');
+  await w.click('#ovGo');
+  await w.waitForTimeout(500);
+  ok(await w.evaluate(() => window.__sempat.S.phase === 'WASPADA'), 'warga: fase WASPADA (tanpa evakuasi)');
+  ok((await w.textContent('#stateCard')).includes('Jauhi pantai'), 'warga: instruksi jauhi pantai & sungai');
+  ok(await w.isHidden('#navCard'), 'warga: tidak ada rute evakuasi saat Waspada');
+  await w.evaluate(() => window.scrollTo(0, 0));
+  await shot(w, '08c_warga_waspada');
+  await p.click('[data-act=endalert]');
+  await p.waitForSelector('dialog textarea');
+  await p.fill('dialog textarea', 'Latihan waspada selesai');
+  await p.click('dialog button[value=ok]');
+  await w.waitForFunction(() => window.__sempat.S.phase !== 'WASPADA', null, { timeout: 8000 });
+
+  // ---- petugas survei gedung
+  await p.waitForSelector('#surveyList [data-act=survey]', { timeout: 10000 });
+  const sid = await p.getAttribute('#surveyList [data-act=survey]', 'data-id');
+  await p.click('#surveyList [data-act=survey]');
+  await p.waitForSelector('dialog input[name=levels]');
+  await shot(p, '07b_petugas_survei');
+  await p.fill('dialog input[name=levels]', '5');
+  await p.check('dialog input[name=st][value=beton]');
+  await p.click('dialog button[type=submit]');
+  await p.waitForSelector('dialog input[name=levels]', { state: 'detached', timeout: 8000 });
+  const bv = await (await fetch(`${BASE}/api/buildings/${sid}?area=${area.id}`)).json();
+  ok(bv.building.levels === 5 && bv.building.levels_src === 'survey' && bv.building.verified, 'petugas: survei gedung tersimpan (5 lantai, beton, terverifikasi)');
+  await w.waitForFunction((id) => window.__sempat.S.area.buildings.some((b) => b.id === id && b.verified), sid, { timeout: 8000 });
+  ok(true, 'warga: data gedung hasil survei sampai ke HP (SSE "area")');
+
   // ---- pilih lokasi contoh (tanpa GPS)
   await w.evaluate(() => { localStorage.setItem('sempat_src', JSON.stringify('sim')); });
   await w.reload();
@@ -167,12 +231,24 @@ let SERVER = null;
   const r = await rctx.newPage(); watch(r, 'perencana');
   await r.goto(BASE + '/perencana');
   await r.fill('input[name=u]', 'perencana'); await r.fill('input[name=p]', 'perencana123'); await r.click('#loginf button[type=submit]');
-  await r.waitForFunction(() => document.querySelectorAll('#stats .stat').length === 4, null, { timeout: 15000 });
+  await r.waitForFunction(() => document.querySelectorAll('#stats .stat').length >= 5, null, { timeout: 15000 });
+  ok((await r.textContent('#stats')).includes('Gedung layak evakuasi vertikal'), 'perencana: jumlah gedung layak evakuasi vertikal untuk skenario tsunami');
   await r.click('[data-act=analyze]');
   await r.waitForFunction(() => document.querySelector('#analyzeMsg').textContent.startsWith('Selesai'), null, { timeout: 30000 });
   ok(true, 'perencana: analisis area di layar (jalan + bangunan + elevasi)');
   await r.waitForFunction(() => document.querySelectorAll('#recList .item').length > 0, null, { timeout: 15000 });
   ok(true, 'perencana: rekomendasi shelter pada area baru');
+  ok((await r.textContent('#recList')).includes('naik minimal lantai'), 'perencana: rekomendasi menyebut lantai aman minimum');
+  ok((await r.textContent('#dgSummary')).includes('non-hunian'), 'perencana: ringkasan sumber data jumlah lantai');
+  // skenario tsunami lebih tinggi -> lebih sedikit gedung layak
+  const n10 = await r.evaluate(() => window.__perencana && window.__perencana.plan.suitable_count);
+  await r.fill('#wave', '3'); await r.dispatchEvent('#wave', 'input');
+  await r.waitForFunction(() => window.__perencana.plan && window.__perencana.plan.wave_m === 3, null, { timeout: 10000 });
+  const n3 = await r.evaluate(() => window.__perencana.plan.suitable_count);
+  ok(n3 >= n10, `perencana: tinggi rencana 3 m -> ${n3} gedung layak, 10 m -> ${n10}`);
+  await r.locator('[data-act=fly]').first().click();
+  await r.waitForSelector('#infoBld.vbox', { timeout: 10000 });
+  ok((await r.textContent('#infoBld')).includes('Awas'), 'perencana: kelayakan evakuasi vertikal per tingkat (Waspada/Siaga/Awas)');
   await shot(r, '10_perencana_analisis');
 
   // ---- offline: server dimatikan (setara internet putus untuk halaman maupun service worker)

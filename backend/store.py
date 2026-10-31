@@ -35,9 +35,15 @@ CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS push_subs (
   endpoint TEXT PRIMARY KEY, sub TEXT, lat REAL, lon REAL, created_at TEXT, updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS building_info (
+  area_id TEXT, building_id TEXT, levels INTEGER, basement INTEGER, structure TEXT, access TEXT,
+  roof INTEGER, slf INTEGER, note TEXT, updated_by TEXT, updated_at TEXT,
+  PRIMARY KEY (area_id, building_id)
+);
 """
 # Kolom yang ditambahkan setelah versi awal (migrasi ringan)
-MIGRATIONS = [("alerts", "radius_km", "REAL"), ("alerts", "created_by", "TEXT")]
+MIGRATIONS = [("alerts", "radius_km", "REAL"), ("alerts", "created_by", "TEXT"),
+              ("alerts", "level", "TEXT"), ("alerts", "wave_m", "REAL")]
 
 
 def now_iso() -> str:
@@ -88,7 +94,8 @@ class Store:
         a.setdefault("issued_at", now_iso())
         a.setdefault("status", "aktif")
         cols = ["id", "source", "event", "magnitude", "depth_km", "lat", "lon", "region", "tsunami",
-                "issued_at", "eta_min", "status", "headline", "instruction", "raw", "radius_km", "created_by"]
+                "issued_at", "eta_min", "status", "headline", "instruction", "raw", "radius_km", "created_by",
+                "level", "wave_m"]
         self._x(f"INSERT INTO alerts({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                 tuple(a.get(c) for c in cols))
         return self.get_alert(a["id"])
@@ -196,6 +203,34 @@ class Store:
 
     def unregister_shelter(self, area_id: str, bid: str) -> None:
         self._x("DELETE FROM shelters WHERE area_id=? AND building_id=?", (area_id, bid))
+
+    # ---------- survei gedung oleh petugas ----------
+    def list_building_info(self, area_id: str) -> List[dict]:
+        return [_binfo_out(r) for r in self._q("SELECT * FROM building_info WHERE area_id=?", (area_id,))]
+
+    def get_building_info(self, area_id: str, bid: str) -> Optional[dict]:
+        r = self._q("SELECT * FROM building_info WHERE area_id=? AND building_id=?", (area_id, bid))
+        return _binfo_out(r[0]) if r else None
+
+    def set_building_info(self, area_id: str, bid: str, f: dict, by: str) -> dict:
+        self._x("""INSERT INTO building_info(area_id,building_id,levels,basement,structure,access,roof,slf,note,
+                   updated_by,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(area_id,building_id) DO UPDATE SET levels=excluded.levels, basement=excluded.basement,
+                   structure=excluded.structure, access=excluded.access, roof=excluded.roof, slf=excluded.slf,
+                   note=excluded.note, updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+                (area_id, bid, f.get("levels"), f.get("basement", 0), f.get("structure"), f.get("access"),
+                 int(bool(f.get("roof"))), int(bool(f.get("slf"))), f.get("note", ""), by, now_iso()))
+        return self.get_building_info(area_id, bid)
+
+    def delete_building_info(self, area_id: str, bid: str) -> None:
+        self._x("DELETE FROM building_info WHERE area_id=? AND building_id=?", (area_id, bid))
+
+
+def _binfo_out(r: dict) -> dict:
+    r = dict(r)
+    r["roof"] = bool(r.get("roof"))
+    r["slf"] = bool(r.get("slf"))
+    return r
 
 
 def _alert_out(r: dict) -> dict:

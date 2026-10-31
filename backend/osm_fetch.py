@@ -47,8 +47,12 @@ FACILITY_AMENITY = "hospital|clinic|doctors|police|fire_station|townhall|communi
 
 
 def overpass_query(bbox: Tuple[float, float, float, float], *, coast_pad_deg: float = 0.035,
-                   buildings: bool = False, facilities: bool = True, timeout: int = 90) -> str:
-    """bbox = (selatan, barat, utara, timur)."""
+                   buildings=False, facilities: bool = True, timeout: int = 90) -> str:
+    """bbox = (selatan, barat, utara, timur).
+
+    buildings: True = semua bangunan; "tall" = hanya gedung bertingkat yang tercatat jumlah lantai/tingginya
+    (kandidat evakuasi vertikal tsunami, jauh lebih ringan untuk peta otomatis); False = tanpa bangunan.
+    """
     s, w, n, e = bbox
     b = f"{s:.6f},{w:.6f},{n:.6f},{e:.6f}"
     cb = f"{s - coast_pad_deg:.6f},{w - coast_pad_deg:.6f},{n + coast_pad_deg:.6f},{e + coast_pad_deg:.6f}"
@@ -56,7 +60,10 @@ def overpass_query(bbox: Tuple[float, float, float, float], *, coast_pad_deg: fl
          f'  way["highway"]({b});',
          f'  way["natural"="coastline"]({cb});',
          f'  way["waterway"~"^(river|canal)$"]({b});']
-    if buildings:
+    if buildings == "tall":
+        q.append(f'  way["building"]["building:levels"~"^([2-9]|[1-9][0-9]+)"]({b});')
+        q.append(f'  way["building"]["height"]({b});')
+    elif buildings:
         q.append(f'  way["building"]({b});')
     q += [")->.net;", ".net out geom;"]
     if facilities:
