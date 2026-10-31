@@ -1,0 +1,464 @@
+[
+ {
+  "buildings": 399,
+  "nodes": 100,
+  "build_area_s": 0.04,
+  "server_ready_s": 4.03,
+  "server": {
+   "area_publik": {
+    "cold_s": 0.004,
+    "warm_s": 0.002,
+    "gzip_B": 2716,
+    "raw_B": 15348
+   },
+   "area_petugas": {
+    "cold_s": 0.018,
+    "warm_s": 0.006,
+    "gzip_B": 30218,
+    "raw_B": 270921
+   },
+   "tables": {
+    "s": 0.002,
+    "gzip_B": 1505,
+    "raw_B": 14015
+   },
+   "time_grid": {
+    "cold_s": 0.003,
+    "cached_s": 0.002,
+    "gzip_B": 361,
+    "runs": 0
+   },
+   "survey": {
+    "put_s": 2.938,
+    "patch_s": 0.007,
+    "patch_gzip_B": 599,
+    "full_reload_gzip_B": 2780,
+    "full_reload_s": 0.005
+   }
+  },
+  "browser": {
+   "desktop": {
+    "profile": "desktop",
+    "area": "bench400",
+    "roles": {
+     "warga": {
+      "t_area_ms": 697,
+      "t_ready_ms": 1059,
+      "area_transfer_B": 3080,
+      "geojson_ms": 0,
+      "buildings_client": 14,
+      "heap_MB": 16.1,
+      "fps_3d": 24,
+      "marks": {
+       "mapobj": 171,
+       "load": 482,
+       "idle": 535,
+       "area": 697,
+       "tables": 1059
+      },
+      "errors": []
+     },
+     "petugas": {
+      "t_area_ms": 294,
+      "t_ready_ms": 1025,
+      "area_transfer_B": 30633,
+      "geojson_ms": 0.4,
+      "buildings_client": 399,
+      "heap_MB": 10.2,
+      "fps_3d": 14,
+      "marks": {
+       "area": 294,
+       "mapobj": 294,
+       "tables": 1011,
+       "load": 1024,
+       "idle": 1025
+      },
+      "errors": []
+     },
+     "perencana": {
+      "t_area_ms": 213,
+      "t_ready_ms": 743,
+      "area_transfer_B": 30633,
+      "geojson_ms": 0.4,
+      "buildings_client": 399,
+      "heap_MB": 15,
+      "fps_3d": 17,
+      "marks": {
+       "area": 213,
+       "mapobj": 213,
+       "load": 577,
+       "idle": 577,
+       "tables": 743
+      },
+      "errors": []
+     }
+    }
+   },
+   "android": {
+    "profile": "android",
+    "area": "bench400",
+    "roles": {
+     "warga": {
+      "t_area_ms": 2844,
+      "t_ready_ms": 3616,
+      "area_transfer_B": 3080,
+      "geojson_ms": 0,
+      "buildings_client": 14,
+      "heap_MB": 12,
+      "fps_3d": 21,
+      "marks": {
+       "mapobj": 2040,
+       "load": 2482,
+       "idle": 2483,
+       "area": 2844,
+       "tables": 3616
+      },
+      "errors": []
+     },
+     "petugas": {
+      "t_area_ms": 2788,
+      "t_ready_ms": 3641,
+      "area_transfer_B": 30633,
+      "geojson_ms": 4.1,
+      "buildings_client": 399,
+      "heap_MB": 9.6,
+      "fps_3d": 21,
+      "marks": {
+       "area": 2788,
+       "mapobj": 2790,
+       "tables": 3628,
+       "load": 3640,
+       "idle": 3641
+      },
+      "errors": []
+     },
+     "perencana": {
+      "t_area_ms": 2895,
+      "t_ready_ms": 3475,
+      "area_transfer_B": 30633,
+      "geojson_ms": 0.9,
+      "buildings_client": 399,
+      "heap_MB": 14.7,
+      "fps_3d": 60,
+      "marks": {
+       "area": 2895,
+       "mapobj": 2895,
+       "load": 3407,
+       "idle": 3407,
+       "tables": 3475
+      },
+      "errors": []
+     }
+    }
+   }
+  }
+ },
+ {
+  "buildings": 4983,
+  "nodes": 900,
+  "build_area_s": 0.64,
+  "server_ready_s": 4.04,
+  "server": {
+   "area_publik": {
+    "cold_s": 0.012,
+    "warm_s": 0.004,
+    "gzip_B": 15615,
+    "raw_B": 141894
+   },
+   "area_petugas": {
+    "cold_s": 0.229,
+    "warm_s": 0.06,
+    "gzip_B": 373327,
+    "raw_B": 3349309
+   },
+   "tables": {
+    "s": 0.003,
+    "gzip_B": 3274,
+    "raw_B": 97131
+   },
+   "time_grid": {
+    "cold_s": 0.013,
+    "cached_s": 0.002,
+    "gzip_B": 666,
+    "runs": 121
+   },
+   "survey": {
+    "put_s": 2.783,
+    "patch_s": 0.003,
+    "patch_gzip_B": 603,
+    "full_reload_gzip_B": 15708,
+    "full_reload_s": 0.011
+   }
+  },
+  "browser": {
+   "desktop": {
+    "profile": "desktop",
+    "area": "bench5000",
+    "roles": {
+     "warga": {
+      "t_area_ms": 646,
+      "t_ready_ms": 1375,
+      "area_transfer_B": 16008,
+      "geojson_ms": 0.1,
+      "buildings_client": 155,
+      "heap_MB": 17.8,
+      "fps_3d": 23,
+      "marks": {
+       "mapobj": 165,
+       "area": 646,
+       "tables": 882,
+       "load": 1031,
+       "idle": 1375
+      },
+      "errors": []
+     },
+     "petugas": {
+      "t_area_ms": 444,
+      "t_ready_ms": 1463,
+      "area_transfer_B": 373754,
+      "geojson_ms": 2.3,
+      "buildings_client": 4983,
+      "heap_MB": 22.4,
+      "fps_3d": 10,
+      "marks": {
+       "area": 444,
+       "mapobj": 444,
+       "tables": 1025,
+       "load": 1463,
+       "idle": 1463
+      },
+      "errors": []
+     },
+     "perencana": {
+      "t_area_ms": 326,
+      "t_ready_ms": 1451,
+      "area_transfer_B": 373754,
+      "geojson_ms": 1.4,
+      "buildings_client": 4983,
+      "heap_MB": 20.5,
+      "fps_3d": 13,
+      "marks": {
+       "area": 326,
+       "mapobj": 326,
+       "tables": 702,
+       "load": 1450,
+       "idle": 1451
+      },
+      "errors": []
+     }
+    }
+   },
+   "android": {
+    "profile": "android",
+    "area": "bench5000",
+    "roles": {
+     "warga": {
+      "t_area_ms": 3043,
+      "t_ready_ms": 3892,
+      "area_transfer_B": 16008,
+      "geojson_ms": 0.1,
+      "buildings_client": 155,
+      "heap_MB": 16.2,
+      "fps_3d": 23,
+      "marks": {
+       "mapobj": 1999,
+       "load": 2481,
+       "idle": 2482,
+       "area": 3043,
+       "tables": 3892
+      },
+      "errors": []
+     },
+     "petugas": {
+      "t_area_ms": 4729,
+      "t_ready_ms": 5748,
+      "area_transfer_B": 373754,
+      "geojson_ms": 5.9,
+      "buildings_client": 4983,
+      "heap_MB": 14.8,
+      "fps_3d": 15,
+      "marks": {
+       "area": 4729,
+       "mapobj": 4729,
+       "tables": 5429,
+       "load": 5748,
+       "idle": 5748
+      },
+      "errors": []
+     },
+     "perencana": {
+      "t_area_ms": 4730,
+      "t_ready_ms": 5850,
+      "area_transfer_B": 373754,
+      "geojson_ms": 6.4,
+      "buildings_client": 4983,
+      "heap_MB": 18.5,
+      "fps_3d": 60,
+      "marks": {
+       "area": 4730,
+       "mapobj": 4730,
+       "tables": 5499,
+       "load": 5778,
+       "idle": 5850
+      },
+      "errors": []
+     }
+    }
+   }
+  }
+ },
+ {
+  "buildings": 19926,
+  "nodes": 3481,
+  "build_area_s": 4.79,
+  "server_ready_s": 4.53,
+  "server": {
+   "area_publik": {
+    "cold_s": 0.037,
+    "warm_s": 0.011,
+    "gzip_B": 55513,
+    "raw_B": 554716
+   },
+   "area_petugas": {
+    "cold_s": 0.732,
+    "warm_s": 0.262,
+    "gzip_B": 1528038,
+    "raw_B": 13401587
+   },
+   "tables": {
+    "s": 0.004,
+    "gzip_B": 8113,
+    "raw_B": 356085
+   },
+   "time_grid": {
+    "cold_s": 0.047,
+    "cached_s": 0.003,
+    "gzip_B": 947,
+    "runs": 246
+   },
+   "survey": {
+    "put_s": 3.091,
+    "patch_s": 0.003,
+    "patch_gzip_B": 600,
+    "full_reload_gzip_B": 55596,
+    "full_reload_s": 0.037
+   }
+  },
+  "browser": {
+   "desktop": {
+    "profile": "desktop",
+    "area": "bench20000",
+    "roles": {
+     "warga": {
+      "t_area_ms": 775,
+      "t_ready_ms": 1696,
+      "area_transfer_B": 55896,
+      "geojson_ms": 0.5,
+      "buildings_client": 592,
+      "heap_MB": 16.2,
+      "fps_3d": 23,
+      "marks": {
+       "mapobj": 195,
+       "area": 775,
+       "tables": 1047,
+       "load": 1696,
+       "idle": 1696
+      },
+      "errors": []
+     },
+     "petugas": {
+      "t_area_ms": 1167,
+      "t_ready_ms": 3461,
+      "area_transfer_B": 1528478,
+      "geojson_ms": 5.8,
+      "buildings_client": 19926,
+      "heap_MB": 83.7,
+      "fps_3d": 10,
+      "marks": {
+       "area": 1167,
+       "mapobj": 1167,
+       "tables": 1504,
+       "load": 3461,
+       "idle": 3461
+      },
+      "errors": []
+     },
+     "perencana": {
+      "t_area_ms": 687,
+      "t_ready_ms": 3077,
+      "area_transfer_B": 1528478,
+      "geojson_ms": 3.3,
+      "buildings_client": 19926,
+      "heap_MB": 63,
+      "fps_3d": 8,
+      "marks": {
+       "area": 687,
+       "mapobj": 687,
+       "tables": 1146,
+       "load": 3077,
+       "idle": 3077
+      },
+      "errors": []
+     }
+    }
+   },
+   "android": {
+    "profile": "android",
+    "area": "bench20000",
+    "roles": {
+     "warga": {
+      "t_area_ms": 3158,
+      "t_ready_ms": 4666,
+      "area_transfer_B": 55896,
+      "geojson_ms": 2,
+      "buildings_client": 592,
+      "heap_MB": 14.6,
+      "fps_3d": 22,
+      "marks": {
+       "mapobj": 2017,
+       "area": 3158,
+       "tables": 3834,
+       "load": 4666,
+       "idle": 4666
+      },
+      "errors": []
+     },
+     "petugas": {
+      "t_area_ms": 11133,
+      "t_ready_ms": 13194,
+      "area_transfer_B": 1528478,
+      "geojson_ms": 19.7,
+      "buildings_client": 19926,
+      "heap_MB": 46.9,
+      "fps_3d": 16,
+      "marks": {
+       "area": 11133,
+       "mapobj": 11133,
+       "tables": 11782,
+       "load": 13194,
+       "idle": 13194
+      },
+      "errors": []
+     },
+     "perencana": {
+      "t_area_ms": 11347,
+      "t_ready_ms": 13687,
+      "area_transfer_B": 1528478,
+      "geojson_ms": 16.1,
+      "buildings_client": 19926,
+      "heap_MB": 55.3,
+      "fps_3d": 58,
+      "marks": {
+       "area": 11347,
+       "mapobj": 11347,
+       "tables": 11810,
+       "load": 13684,
+       "idle": 13687
+      },
+      "errors": []
+     }
+    }
+   }
+  }
+ }
+]

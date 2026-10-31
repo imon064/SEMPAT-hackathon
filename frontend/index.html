@@ -54,16 +54,7 @@
       <div id="map" class="map tall" role="application" aria-label="Peta evakuasi. Garis biru adalah rute Anda."></div>
       <button type="button" id="recenter" class="btn primary map-btn hidden">Pusatkan ke saya</button>
     </div>
-    <div class="legend" aria-hidden="true">
-      <span><i class="swatch" style="background:#1d4ed8"></i>Rute Anda</span>
-      <span><i class="swatch" style="background:#dc2626;opacity:.6"></i>Zona bahaya</span>
-      <span><i class="swatch" style="background:#16a34a;opacity:.6"></i>Zona aman</span>
-      <span><i class="swatch" style="background:#b91c1c"></i>Jalan putus</span>
-      <span><i class="swatch box" style="background:#166534;border-radius:50%"></i>Posko / bantuan</span>
-      <span><i class="swatch box" style="background:#14532d"></i>Titik kumpul resmi</span>
-      <span><i class="swatch box" style="background:#475569;border-radius:50%"></i>Fasilitas umum (OSM)</span>
-      <span><i class="swatch box" style="background:#6d28d9"></i>Gedung evakuasi darurat (L3+ = naik minimal lantai 3)</span>
-    </div>
+      <!-- Legend: dinamis di dalam peta, mengikuti lapisan aktif (common.js createMap) -->
 
     <section id="locCard" class="card stack" aria-labelledby="locTitle">
       <div class="row"><h2 id="locTitle" class="grow" style="margin:0;font-size:1.05rem">Lokasi Anda</h2><span id="locStatus" class="small muted"></span></div>

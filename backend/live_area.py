@@ -11,7 +11,7 @@ import math
 import os
 from typing import Callable, List, Optional, Tuple
 
-from . import osm_fetch
+from . import osm_fetch, tsunami
 from .area_builder import build_area
 from .geo import haversine_m
 
@@ -47,7 +47,14 @@ def covers(meta: dict, lat: float, lon: float, margin_m: float = CORE_MARGIN_M) 
 def internet_source(cache_dir, log) -> Source:
     def src(bbox, buildings):
         q = osm_fetch.overpass_query(bbox, buildings=buildings)
-        data = osm_fetch.fetch_overpass(q, log=log)
+        try:
+            data = osm_fetch.fetch_overpass(q, log=log)
+        except osm_fetch.OverpassQueryError as exc:
+            if buildings != "tall":
+                raise
+            # Query baru (fungsi gedung, length(), building:part) ditolak server: pakai filter lama yang terbukti jalan.
+            log(f"  {exc}; memakai query gedung lama (hanya yang bertag jumlah lantai/tinggi).")
+            data = osm_fetch.fetch_overpass(osm_fetch.overpass_query(bbox, buildings="tall_legacy"), log=log)
         return data, osm_fetch.default_dem(cache_dir, log=log)
     return src
 
@@ -70,7 +77,7 @@ def _test_source() -> Optional[Source]:
             if el.get("geometry"):
                 el["geometry"] = [{"lat": g["lat"] + dlat, "lon": g["lon"] + dlon} for g in el["geometry"]]
             tags = el.get("tags") or {}
-            if tags.get("building") and not _keep_building(tags, buildings):
+            if tags.get("building") and not _keep_building(tags, buildings, el.get("geometry")):
                 continue
             els.append(el)
         a, b = synthetic.PROJ.to_latlon(620, 1690)
@@ -84,12 +91,10 @@ def _test_source() -> Optional[Source]:
     return src
 
 
-def _keep_building(tags: dict, buildings) -> bool:
+def _keep_building(tags: dict, buildings, geometry=None) -> bool:
+    """Saringan bangunan mode uji = saringan query Overpass peta otomatis (osm_fetch.relevant_building)."""
     if buildings == "tall":
-        try:
-            return float(str(tags.get("building:levels", "0")).split(";")[0]) >= 2 or bool(tags.get("height"))
-        except ValueError:
-            return bool(tags.get("height"))
+        return osm_fetch.relevant_building(tags, geometry)
     return bool(buildings)
 
 
@@ -136,7 +141,7 @@ def build_around(lat: float, lon: float, *, source: Optional[Source] = None, cac
     src = source or _test_source() or internet_source(cache_dir, log)
     clat, clon = round(lat / GRID_DEG) * GRID_DEG, round(lon / GRID_DEG) * GRID_DEG
     aid = live_id(lat, lon)
-    name = None if os.environ.get("SEMPAT_FAKE_OSM") == "1" else osm_fetch.reverse_name(lat, lon)
+    name, state = (None, None) if os.environ.get("SEMPAT_FAKE_OSM") == "1" else osm_fetch.reverse_place(lat, lon)
     name = name or f"Sekitar {lat:.3f}, {lon:.3f}"
     log(f"Membangun peta di sekitar {lat:.5f}, {lon:.5f} ({name}) ...")
     area = build_bbox(bbox_around(clat, clon, HALF_M), area_id=aid, name=name, buildings="tall",
@@ -152,4 +157,12 @@ def build_around(lat: float, lon: float, *, source: Optional[Source] = None, cac
         area2["meta"]["expanded"] = True
         area = area2
     area["meta"]["built_for"] = [round(lon, 6), round(lat, 6)]
+    set_timezone_from_province(area, state)
     return area
+
+
+def set_timezone_from_province(area: dict, state: Optional[str]) -> None:
+    """Zona waktu eksplisit dari provinsi (Nominatim). Tidak dikenal -> tidak diisi (server memakai cadangan bujur)."""
+    tz = tsunami.timezone_for_province(state)
+    if tz:
+        area["meta"].update(timezone=tz, timezone_src="provinsi", province=state)

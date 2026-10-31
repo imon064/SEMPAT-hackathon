@@ -145,6 +145,24 @@ let SERVER = null;
   const pk2 = await w.textContent('#poskoList');
   log('posko list:', pk2.includes('Posko SAR Uji Padang') ? 'berisi posko petugas' : '(posko petugas tidak terjangkau dari titik ini)');
   await shot(w, '08_warga_alert_petugas');
+  // ---- daya tampung: dasbor petugas menampilkan status alokasi; tidak pernah diam-diam dianggap valid
+  await p.selectOption('#capMode', 'gedung');
+  await p.waitForFunction(() => {
+    const t = document.querySelector('#capBody').textContent;
+    return /Teralokasi|TIDAK CUKUP|Tidak dihitung|Sedang dihitung|Gagal/.test(t);
+  }, null, { timeout: 15000 });
+  const capTxt0 = await p.textContent('#capBody');
+  ok(/Teralokasi|TIDAK CUKUP|Tidak dihitung|Sedang dihitung|Gagal/.test(capTxt0), 'petugas: status daya tampung tampil eksplisit');
+  await p.waitForFunction(() => /Teralokasi|TIDAK CUKUP|Tidak dihitung/.test(document.querySelector('#capBody').textContent), null, { timeout: 120000 });
+  const capTxt = await p.textContent('#capBody');
+  const capState = await p.evaluate(() => window.__petugas.sync.tables.capacity.gedung);
+  if (capState.totals) {
+    ok(capTxt.includes('Penduduk') && capTxt.includes('Tanpa tujuan terjangkau'), 'petugas: ringkasan permintaan/teralokasi/tanpa tujuan tampil');
+    ok(capState.dests.every((d) => d.allocated <= d.capacity), 'petugas: tidak ada gedung melebihi kapasitas (dari tabel HP)');
+  } else ok(capState.status === 'tanpa_penduduk' || capState.status === 'tanpa_gedung', `petugas: alokasi tidak dihitung dengan status jelas (${capState.status})`);
+  const wcap = await w.evaluate(() => window.__sempat.S.tables.capacity);
+  ok(wcap && wcap.aman && wcap.gedung && typeof wcap.gedung.status === 'string', 'warga: tabel HP membawa status daya tampung');
+  await shot(p, '07c_petugas_daya_tampung');
   await p.click('[data-act=endalert]');
   await p.waitForSelector('dialog textarea');
   await p.fill('dialog textarea', 'Latihan selesai');
@@ -163,10 +181,29 @@ let SERVER = null;
   ok((await w.textContent('#overlay')).includes('SIAGA'), 'warga: tingkat SIAGA tampil di layar peringatan');
   await w.click('#ovGo');
   await w.waitForFunction(() => window.__sempat.S.tables && window.__sempat.S.tables.scenario && window.__sempat.S.tables.scenario.wave_m === 3, null, { timeout: 10000 });
-  const g0 = await w.evaluate(() => (window.__sempat.S.tables.dests.gedung || [])[0]);
-  ok(g0 && g0.min_floor >= 2, `warga: ada gedung layak untuk Siaga (${g0 && g0.name}, lantai ${g0 && g0.min_floor}+)`);
-  await wctx.setGeolocation({ latitude: g0.lat - 0.0004, longitude: g0.lon + 0.0002, accuracy: 10 });
-  await w.waitForSelector('#navVertical .vbox', { timeout: 10000 });
+  // Kebijakan 1 Nov 2026: hanya gedung TERVERIFIKASI yang menjadi tujuan rute; Perlu Verifikasi = info tanpa rute.
+  const dests0 = await w.evaluate(() => window.__sempat.S.tables.dests);
+  ok((dests0.gedung || []).every((d) => !d.id || d.tier === 'verified'), 'warga: tujuan gedung di tabel HP hanya gedung terverifikasi');
+  const u0 = (dests0.unverified || [])[0];
+  ok(u0 && u0.min_floor >= 1, `warga: gedung Perlu Verifikasi dikirim sebagai info (${u0 && u0.name}, lantai aman perkiraan ${u0 && u0.min_floor}+)`);
+  await wctx.setGeolocation({ latitude: u0.lat - 0.0004, longitude: u0.lon + 0.0002, accuracy: 10 });
+  await w.waitForSelector('#navVertical .vbox.unv', { timeout: 10000 });
+  const unvTxt = await w.textContent('#navVertical .vbox.unv');
+  ok(unvTxt.includes('Bukan rekomendasi') && unvTxt.includes(u0.name), 'warga: tidak sempat & tanpa gedung terverifikasi -> gedung belum diverifikasi tampil TANPA rute');
+  ok(await w.locator('#navVertical .vbox.unv [data-act=vertical-on]').count() === 0, 'warga: tidak ada tombol rute ke gedung belum diverifikasi');
+  ok(await w.locator('.mk-gedung.unv').count() > 0, 'warga: penanda peta berbeda untuk gedung belum diverifikasi (garis putus + "?")');
+  await shot(w, '08a_warga_siaga_unverified');
+  // Petugas memverifikasi gedung itu (survei lengkap + elevasi terukur) -> menjadi tujuan dengan rute & lantai.
+  const ub = (await (await fetch(`${BASE}/api/buildings/${u0.id}?area=${area.id}`)).json()).building;
+  const sv0 = await fetch(`${BASE}/api/buildings/${u0.id}`, { method: 'PUT', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    // tanpa elevasi terukur: margin DEM (sedang 3 m) tetap berlaku; dengan elevasi terukur tanah gedung ini di atas
+    // genangan Siaga sehingga tidak perlu naik gedung (diuji di tests/test_milestone1.py)
+    body: JSON.stringify({ area_id: area.id, levels: ub.levels, levels_confirmed: true, condition: 'baik', structure: 'beton', access: '24jam' }) });
+  ok(sv0.status === 200 && (await sv0.json()).tier === 'verified', 'petugas: gedung lolos survei lengkap -> Terverifikasi');
+  await w.waitForFunction((id) => { const t = window.__sempat.S.tables; return !!(t && t.dests && (t.dests.gedung || []).some((d) => d.id === id)); }, u0.id, { timeout: 15000 });
+  const g0 = await w.evaluate((id) => window.__sempat.S.tables.dests.gedung.find((d) => d.id === id), u0.id);
+  ok(g0 && g0.min_floor >= 1 && g0.tier === 'verified', `warga: gedung terverifikasi menjadi tujuan Siaga (${g0 && g0.name}, lantai ${g0 && g0.min_floor}+)`);
+  await w.waitForSelector('#navVertical .vbox:not(.unv) [data-act=vertical-on]', { timeout: 10000 });
   ok((await w.textContent('#navVertical')).includes('lantai'), 'warga: tidak sempat ke tanah tinggi -> ditawari gedung + lantai minimum');
   ok(await w.locator('.mk-gedung').count() > 0, 'warga: gedung evakuasi darurat tampil di peta (label L2+/L3+)');
   await w.click('[data-act=vertical-on]');
@@ -207,13 +244,28 @@ let SERVER = null;
   await p.click('#surveyList [data-act=survey]');
   await p.waitForSelector('dialog input[name=levels]');
   await shot(p, '07b_petugas_survei');
+  ok(await p.inputValue('dialog input[name=levels]') === '', 'petugas: isian jumlah lantai kosong (data peta tidak otomatis jadi hasil survei)');
+  ok(!(await p.isChecked('dialog input[name=ac][value="24jam"]')), 'petugas: akses tidak otomatis terisi "24 jam"');
   await p.fill('dialog input[name=levels]', '5');
   await p.check('dialog input[name=st][value=beton]');
+  await p.check('dialog input[name=cond][value=baik]');
+  await p.check('dialog input[name=ac][value="24jam"]');
+  await p.click('dialog button[type=submit]');
+  await p.waitForFunction(() => (document.querySelector('#svErr') || {}).textContent.includes('dihitung langsung'), null, { timeout: 5000 });
+  ok(true, 'petugas: jumlah lantai tanpa konfirmasi "dihitung langsung" ditolak');
+  await p.check('dialog input[name=lvok]');
+  await p.check('dialog input[name=ac][value=jam_kerja]');
+  ok(await p.isVisible('dialog input[name=hours]'), 'petugas: akses jam tertentu meminta jam buka sebenarnya');
+  await p.click('dialog button[type=submit]');
+  await p.waitForFunction(() => (document.querySelector('#svErr') || {}).textContent.includes('jam buka'), null, { timeout: 5000 });
+  ok(true, 'petugas: survei "jam tertentu" tanpa jam buka ditolak');
+  await p.check('dialog input[name=ac][value="24jam"]');
   await p.click('dialog button[type=submit]');
   await p.waitForSelector('dialog input[name=levels]', { state: 'detached', timeout: 8000 });
   const bv = await (await fetch(`${BASE}/api/buildings/${sid}?area=${area.id}`)).json();
-  ok(bv.building.levels === 5 && bv.building.levels_src === 'survey' && bv.building.verified, 'petugas: survei gedung tersimpan (5 lantai, beton, terverifikasi)');
-  await w.waitForFunction((id) => window.__sempat.S.area.buildings.some((b) => b.id === id && b.verified), sid, { timeout: 8000 });
+  ok(bv.building.levels === 5 && bv.building.levels_src === 'survey' && bv.building.surveyed && bv.tier === 'verified',
+    `petugas: survei gedung tersimpan (5 lantai dihitung langsung, beton, kondisi baik -> ${bv.tier})`);
+  await w.waitForFunction((id) => window.__sempat.S.area.buildings.some((b) => b.id === id && b.surveyed && b.tier === 'verified'), sid, { timeout: 8000 });
   ok(true, 'warga: data gedung hasil survei sampai ke HP (SSE "area")');
 
   // ---- pilih lokasi contoh (tanpa GPS)
@@ -232,14 +284,20 @@ let SERVER = null;
   await r.goto(BASE + '/perencana');
   await r.fill('input[name=u]', 'perencana'); await r.fill('input[name=p]', 'perencana123'); await r.click('#loginf button[type=submit]');
   await r.waitForFunction(() => document.querySelectorAll('#stats .stat').length >= 5, null, { timeout: 15000 });
-  ok((await r.textContent('#stats')).includes('Gedung layak evakuasi vertikal'), 'perencana: jumlah gedung layak evakuasi vertikal untuk skenario tsunami');
+  ok((await r.textContent('#stats')).includes('Gedung evakuasi vertikal') && (await r.textContent('#stats')).includes('Terverifikasi'), 'perencana: jumlah gedung evakuasi vertikal (terverifikasi vs perlu verifikasi) untuk skenario tsunami');
   await r.click('[data-act=analyze]');
   await r.waitForFunction(() => document.querySelector('#analyzeMsg').textContent.startsWith('Selesai'), null, { timeout: 30000 });
   ok(true, 'perencana: analisis area di layar (jalan + bangunan + elevasi)');
   await r.waitForFunction(() => document.querySelectorAll('#recList .item').length > 0, null, { timeout: 15000 });
   ok(true, 'perencana: rekomendasi shelter pada area baru');
   ok((await r.textContent('#recList')).includes('naik minimal lantai'), 'perencana: rekomendasi menyebut lantai aman minimum');
-  ok((await r.textContent('#dgSummary')).includes('non-hunian'), 'perencana: ringkasan sumber data jumlah lantai');
+  ok((await r.textContent('#dgSummary')).includes('Sumber jumlah lantai'), 'perencana: ringkasan sumber data jumlah lantai');
+  ok((await r.textContent('#recList')).includes('Perlu Verifikasi'), 'perencana: rekomendasi belum disurvei berlabel "Perlu Verifikasi"');
+  await r.selectOption('#scnTime', '02:00');
+  await r.waitForFunction(() => window.__perencana.plan && window.__perencana.plan.time && window.__perencana.plan.time.label.startsWith('02.00'), null, { timeout: 10000 });
+  ok((await r.textContent('#stats')).includes('Jam skenario: 02.00'), 'perencana: jam skenario (02.00) diteruskan ke optimizer');
+  await r.selectOption('#scnTime', 'terburuk');
+  await r.waitForFunction(() => window.__perencana.plan && window.__perencana.plan.time && window.__perencana.plan.time.mode === 'terburuk', null, { timeout: 10000 });
   // skenario tsunami lebih tinggi -> lebih sedikit gedung layak
   const n10 = await r.evaluate(() => window.__perencana && window.__perencana.plan.suitable_count);
   await r.fill('#wave', '3'); await r.dispatchEvent('#wave', 'input');

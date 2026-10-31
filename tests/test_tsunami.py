@@ -11,8 +11,10 @@ from tests.test_api import APITestBase
 
 
 def _b(**kw):
+    # Elevasi DIUKUR (margin 0 m) agar uji aturan lantai di sini tidak bercampur dengan margin DEM (diuji di
+    # tests/test_milestone1.py).
     b = {"id": "x", "kind": "sekolah", "levels": 4, "levels_src": "osm", "elev": 1.0, "area_m2": 400.0,
-         "structure": "tidak_tahu"}
+         "structure": "tidak_tahu", "elev_src": "survei", "elev_method": "benchmark"}
     b.update(kw)
     return b
 
@@ -39,7 +41,7 @@ class TestRules(unittest.TestCase):
         self.assertEqual(a["min_floor"], 3)
         self.assertEqual(a["usable_floors"], 2)
         self.assertEqual(a["capacity"], int(400 * 2 * 0.5 / 0.93))
-        self.assertAlmostEqual(a["climb_s"], 2 * 3.0 / 0.21, places=0)
+        self.assertAlmostEqual(a["climb_s"], 2 * 4.0 / 0.21, places=0)  # satu tinggi lantai: height_per_level_m 4 m
         self.assertFalse(tsunami.assess(_b(levels=2, elev=1.0), 3.0, p)["suitable"])        # terlalu rendah
         self.assertFalse(tsunami.assess(_b(levels_src="default"), 3.0, p)["suitable"])      # lantai tak diketahui
         self.assertFalse(tsunami.assess(_b(kind="rumah"), 3.0, p)["suitable"])              # rumah pribadi
@@ -101,7 +103,8 @@ class TestBuilderAndEngine(unittest.TestCase):
         sma = B["SMA Uji"]
         self.assertEqual((sma["levels"], sma["levels_src"], sma["structure"], sma["basement"]), (5, "osm", "beton", 1))
         h = B["w61"]
-        self.assertEqual((h["levels"], h["levels_src"], h["height_m"]), (4, "osm_height", 13.0))
+        # height 13 m / 3,5 m per lantai (ASUMSI) = 3 lantai utuh, ditandai perkiraan
+        self.assertEqual((h["levels"], h["levels_src"], h["height_m"], h["levels_est"]), (3, "osm_height", 13.0, True))
         self.assertEqual(B["w62"]["levels_src"], "default")
         flags = self.area["edges"]["flag"]
         self.assertIn("under", flags)
@@ -127,13 +130,27 @@ class TestBuilderAndEngine(unittest.TestCase):
         self.assertTrue(mids, "rute seharusnya memutar lewat jalan samping")
 
     def test_gedung_table_and_scenario(self):
+        # SMA Uji belum disurvei (Perlu Verifikasi): BUKAN tujuan rute/alokasi, hanya informasi tanpa rute.
+        lt0 = self.eng.live_tables(closures=set(), shelter_ids=[], points=[], alert_active=True, wave_m=3.0)
+        self.assertNotIn("SMA Uji", {d["name"] for d in lt0["dests"]["gedung"]})
+        b0 = next(x for x in self.area["buildings"] if x["name"] == "SMA Uji")
+        a0 = self.eng.assess(b0, 3.0)
+        self.assertFalse(a0["destination"])
+        # daftar info = lolos lantai aman konservatif DAN belum terverifikasi (sama dengan assess)
+        self.assertEqual("SMA Uji" in {d["name"] for d in lt0["dests"]["unverified"]}, a0["suitable"])
+        # Setelah survei lengkap + elevasi terukur: tujuan gedung dengan lantai aman tanpa margin.
+        area = json.loads(json.dumps(self.area))
+        b = next(x for x in area["buildings"] if x["name"] == "SMA Uji")
+        b.update(levels_src="survey", surveyed=True, condition="baik", access="24jam", elev_src="survei",
+                 elev_method="benchmark")
+        self.eng = Engine(area)
+        self.area = area
         lt = self.eng.live_tables(closures=set(), shelter_ids=[], points=[], alert_active=True, wave_m=3.0)
         self.assertIn("gedung-umum", lt["tables"])
         names = {d["name"]: d for d in lt["dests"]["gedung"]}
         self.assertIn("SMA Uji", names)
         self.assertEqual(lt["scenario"]["wave_m"], 3.0)
         sma = names["SMA Uji"]
-        b = next(x for x in self.area["buildings"] if x["name"] == "SMA Uji")
         self.assertEqual(sma["min_floor"], tsunami.min_safe_floor(3.0 - b["elev"]))
         # Gedung tanpa data lantai tidak pernah disarankan
         self.assertFalse(any(d.get("id") == "w62" for d in lt["dests"]["gedung"]))
@@ -173,8 +190,15 @@ class TestPlanScenario(unittest.TestCase):
         self.assertEqual(lo["wave_m"], 3.0)
         names_lo = {b["name"] for b in lo["recommended"]}
         names_hi = {b["name"] for b in hi["recommended"]}
-        # Skenario 3 m: masjid 2 lantai di elevasi rendah layak; skenario 10 m: tidak lagi.
-        self.assertIn("Masjid Al-Ikhlas", {area["buildings"][eng.bindex[i]]["name"] for i in lo["suitable_ids"]})
+        # Masjid 2 lantai, elevasi DEM 2,1 m (kepercayaan sedang): nominal lantai 2 cukup untuk 3 m, tetapi lantai aman
+        # KONSERVATIF (margin 3 m) = lantai 5 -> TIDAK layak (audit D-2). Dengan elevasi terukur: layak.
+        mas = next(b for b in area["buildings"] if b["name"] == "Masjid Al-Ikhlas")
+        a = eng.assess(mas, 3.0)
+        self.assertEqual((a["min_floor_nominal"], a["min_floor"], a["suitable"]), (2, 5, False))
+        self.assertNotIn(mas["id"], lo["suitable_ids"])
+        mas.update(elev_src="survei", elev_method="benchmark")
+        self.assertTrue(eng.assess(mas, 3.0)["suitable"])
+        self.assertFalse(eng.assess(mas, 10.0)["suitable"])
         self.assertNotIn("Masjid Al-Ikhlas", names_hi)
         for r in lo["recommended"] + hi["recommended"]:
             self.assertGreaterEqual(r["levels"], r["min_floor"])
@@ -210,10 +234,10 @@ class TestHeights(unittest.TestCase):
         self.assertEqual(len(feats), 4)
         st = heights.apply_heights(self.area, self.eng, feats, source="upload", log=lambda *_: None)
         self.assertEqual((st["updated"], st["kept"], st["added"], st["unmatched"]), (1, 1, 1, 1))
-        self.assertEqual((B["w62"]["levels"], B["w62"]["levels_src"]), (5, "upload"))
+        self.assertEqual((B["w62"]["levels"], B["w62"]["levels_src"]), (4, "upload"))  # floor(16,4 m / 4 m)
         self.assertEqual(B["w60"]["levels_src"], "osm")
         new = [b for b in self.area["buildings"] if b.get("added_from")]
-        self.assertEqual(new[0]["levels"], 7)
+        self.assertEqual(new[0]["levels"], 5)  # floor(21 m / 4 m); dulu 6 dengan 3,5 m
         self.assertEqual(new[0]["name"], "Gedung baru")
         Engine(self.area)  # area tetap valid
 
@@ -261,7 +285,7 @@ class TestHeights(unittest.TestCase):
         self.assertEqual(st["updated"], 1)
         self.assertEqual(st["added"], 1)
         w62 = next(b for b in self.area["buildings"] if b["id"] == "w62")
-        self.assertEqual((w62["levels"], w62["levels_src"]), (4, "google"))
+        self.assertEqual((w62["levels"], w62["levels_src"]), (3, "google"))  # 12,5 m / 3,5 m
 
     def test_hazard_polygons(self):
         lat0, lon0 = -8.0, 110.0
@@ -290,13 +314,16 @@ class TestTsunamiAPI(APITestBase):
         self.assertIn("SIAGA", r.json()["headline"])
         tb = self.client.get("/api/tables").json()
         self.assertEqual(tb["scenario"]["wave_m"], 3.0)
-        self.assertIn("Masjid Al-Ikhlas", [d["name"] for d in tb["dests"]["gedung"]])
+        # Masjid 2 lantai belum disurvei & elevasi DEM: lantai aman konservatif 5 -> bukan tujuan, bukan info.
+        self.assertNotIn("Masjid Al-Ikhlas", [d["name"] for d in tb["dests"]["gedung"]])
+        self.assertNotIn("Masjid Al-Ikhlas", [d["name"] for d in tb["dests"]["unverified"]])
         st = self.client.get("/api/state").json()
         self.assertEqual(st["scenario"]["level"], "siaga")
         lat, lon = synthetic.PROJ.to_latlon(420, 260)
         rr = self.client.post("/api/route", json={"lat": lat, "lon": lon, "mode": "gedung"}).json()
         self.assertTrue(rr["ok"], rr)
-        self.assertGreaterEqual(rr["routes"][0]["dest"]["min_floor"], 2)
+        # tanpa gedung terverifikasi, mode gedung tetap mengarah ke zona aman / tanah tinggi (bukan gedung unverified)
+        self.assertIn(rr["routes"][0]["dest"]["type"], ("safe_zone", "tanah_tinggi"))
         self.client.post(f"/api/alerts/{r.json()['id']}/end", json={"note": "uji selesai"}, headers=h)
 
         # Waspada: tetap peringatan tsunami, teks "jauhi pantai"
@@ -309,12 +336,16 @@ class TestTsunamiAPI(APITestBase):
         bid = next(b["id"] for b in self.area["buildings"] if b["name"] == "Gudang TPI")
         v = self.client.get(f"/api/buildings/{bid}").json()
         self.assertFalse(v["now"]["suitable"])
-        r = self.client.put(f"/api/buildings/{bid}", json={"levels": 4, "structure": "beton", "access": "24jam",
+        r = self.client.put(f"/api/buildings/{bid}", json={"levels": 4, "levels_confirmed": True, "condition": "baik",
+                                                           "structure": "beton", "access": "24jam",
+                                                           "ground_elev_m": v["building"]["elev"],
+                                                           "ground_elev_method": "benchmark",
                                                            "basement": 0, "roof": True}, headers=h)
         self.assertEqual(r.status_code, 200, r.text)
         v = r.json()
         self.assertEqual(v["building"]["levels_src"], "survey")
-        self.assertTrue(v["building"]["verified"])
+        self.assertTrue(v["building"]["surveyed"])
+        self.assertEqual(v["tier"], "verified")
         self.assertTrue(v["levels"]["siaga"]["suitable"])
         area = self.client.get("/api/area").json()
         self.assertEqual(next(b for b in area["buildings"] if b["id"] == bid)["levels"], 4)
@@ -360,7 +391,7 @@ class TestStaleLiveArea(APITestBase):
         r2 = self.client.post("/api/locate", json={"lat": lat, "lon": lon}).json()
         self.assertEqual(r2["area_id"], aid)
         self.assertTrue(r2["built"])  # dibangun ulang, kini dengan gedung bertingkat
-        self.assertEqual(st.index[aid]["schema"], 2)
+        self.assertEqual(st.index[aid]["schema"], area_builder.AREA_SCHEMA)
         area = self.client.get(f"/api/area?area={aid}").json()
         self.assertTrue(any(b["levels"] >= 2 for b in area["buildings"]))
         r3 = self.client.post("/api/locate", json={"lat": lat, "lon": lon}).json()

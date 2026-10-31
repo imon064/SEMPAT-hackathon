@@ -9,3 +9,6 @@ tests/js/cases.json
 tests/e2e/out/
 node_modules/
 tools/cloudflared*
+tests/js/tables2.json
+tests/js/alloc_cases.json
+tests/js/deadline_cases.json

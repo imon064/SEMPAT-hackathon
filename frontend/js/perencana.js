@@ -1,20 +1,29 @@
 // Dasbor perencana BPBD: siapa yang tidak sempat, shelter vertikal mana yang paling membantu.
 /* global maplibregl, qrcode */
 import { api, Sync, createMap, icon, esc, $, toast, renderLogin, confirmDialog, store, AREA_KIND } from './common.js';
+
+// Grid waktu evakuasi (backend/mapgrid.py, sel 30 m, pita 3 menit) dari tabel rute yang sama dengan warga.
+async function loadTimeGrid() {
+  if (!S.area || !S.m) return;
+  const mode = ($('#tgMode') && $('#tgMode').value) || 'aman';
+  try { S.m.setTimeGrid(await api.get(`/api/areas/${encodeURIComponent(S.area.meta.id)}/time-grid?mode=${mode}&group=umum`)); }
+  catch { S.m.setTimeGrid(null); }
+}
 import { fmtMinutes, fmtDistance, clockTime } from './core.js';
 
 const S = { area: null, meta: null, state: null, m: null, plan: null, busy: false, pending: false, bindex: new Map(),
   marker: null, info: null, sig: '', timer: null };
 const num = (n) => Math.round(n).toLocaleString('id-ID');
-const BKIND = { rumah: 'Rumah', sekolah: 'Sekolah', ibadah: 'Tempat ibadah', kantor: 'Kantor', hotel: 'Hotel', kesehatan: 'Fasilitas kesehatan', lainnya: 'Bangunan' };
-const SRC = { survey: 'Survei petugas', osm: 'OSM (jumlah lantai)', osm_height: 'OSM (tinggi)', google: 'Google 2.5D (perkiraan)', upload: 'Unggahan perencana', default: 'Tidak ada data' };
+const BKIND = { rumah: 'Rumah', apartemen: 'Apartemen/hunian bersama', sekolah: 'Sekolah', ibadah: 'Tempat ibadah', kantor: 'Kantor', hotel: 'Hotel', kesehatan: 'Fasilitas kesehatan', komersial: 'Gedung komersial/kantor', tidak_diketahui: 'Fungsi tidak diketahui', lainnya: 'Bangunan' };
+const SRC = { survey: 'Survei petugas', osm: 'OSM (jumlah lantai)', osm_part: 'OSM (bagian gedung)', osm_height: 'OSM (tinggi, perkiraan)', google: 'Google 2.5D (perkiraan)', upload: 'Unggahan perencana', default: 'Tidak ada data' };
 const LEVEL_TXT = { waspada: 'Waspada (< 0,5 m)', siaga: 'Siaga (0,5–3 m)', awas: 'Awas (> 3 m)' };
 const STATUS_TXT = { sempat: 'Sempat jalan kaki ke tempat aman', terlayani_shelter: 'Sempat ke shelter vertikal', sebagian: 'Sebagian penghuni tidak sempat', tidak_sempat: 'Tidak sempat' };
 
 // ------------------------------------------------------------------ skenario
 function params() {
   return { area_id: S.area ? S.area.meta.id : null, eta_min: +$('#eta').value, delay_min: +$('#delay').value, margin_min: +$('#margin').value,
-    optimize_k: +$('#k').value, use_registered: $('#useReg').checked, design_height_m: +$('#wave').value };
+    optimize_k: +$('#k').value, use_registered: $('#useReg').checked, design_height_m: +$('#wave').value,
+    scenario_time: ($('#scnTime') && $('#scnTime').value) || 'terburuk' };
 }
 function labels() {
   const p = params();
@@ -26,7 +35,14 @@ function labels() {
   const b = p.eta_min - p.delay_min - p.margin_min;
   $('#budgetV').textContent = b > 0 ? `${b} menit` : '0 menit — tidak ada waktu berjalan';
 }
-function schedule() { labels(); clearTimeout(S.timer); S.timer = setTimeout(calc, 250); }
+// Tautan paket bukti membawa area & skenario yang sedang dilihat (ETA, tinggi tsunami).
+function evidenceLink() {
+  const a = document.getElementById('evLink'); if (!a || !S.area) return;
+  const p = new URLSearchParams({ area: S.area.meta.id, eta: $('#eta').value || 20 });
+  if ($('#wave').value) p.set('wave', $('#wave').value);
+  a.href = `/perencana/bukti?${p}`;
+}
+function schedule() { labels(); evidenceLink(); clearTimeout(S.timer); S.timer = setTimeout(calc, 250); }
 
 async function calc() {
   if (S.busy) { S.pending = true; return; }
@@ -56,8 +72,20 @@ function renderPlan() {
     stat(reg ? `Dengan ${p.shelters.length} shelter terdaftar` : 'Shelter terdaftar tidak dihitung', num(r1) + pct(r1), `umum ${num(p.red_after_registered.umum)} · rentan ${num(p.red_after_registered.rentan)}`, r1 ? 'bad' : 'good'),
     stat(`+ ${p.recommended.length} rekomendasi`, num(r2) + pct(r2), `umum ${num(p.red_after.umum)} · rentan ${num(p.red_after.rentan)}`, r2 < r1 || !r2 ? 'good' : 'bad'),
   ].join('');
-  $('#stats').insertAdjacentHTML('beforeend', `<div class="stat" style="grid-column:1/-1"><div class="small muted">Gedung layak evakuasi vertikal untuk tsunami ${String(p.wave_m).replace('.', ',')} m</div>
-    <div class="n">${num(p.suitable_count)}</div><div class="small">kapasitas lantai aman ± ${num(p.suitable_capacity)} orang${p.unknown_levels ? ` · <strong>${num(p.unknown_levels)}</strong> gedung non-hunian belum ada data jumlah lantai — minta petugas survei atau unggah data tinggi` : ''}</div></div>`);
+  $('#stats').insertAdjacentHTML('beforeend', `<div class="stat" style="grid-column:1/-1"><div class="small muted">Gedung evakuasi vertikal untuk tsunami ${String(p.wave_m).replace('.', ',')} m (lantai aman konservatif, termasuk margin galat elevasi)</div>
+    <div class="n">${num(p.destination_count)} <span class="tier-badge t-verified">Terverifikasi</span></div><div class="small">menjadi tujuan rute warga · kapasitas lantai aman ± ${num(p.destination_capacity)} orang</div>
+    <div class="small"><strong>${num(p.verification_count)}</strong> <span class="tier-badge t-unverified">Perlu Verifikasi</span> cukup tinggi bila terverifikasi (± ${num(Math.max(0, p.suitable_capacity - p.destination_capacity))} orang) — <strong>bukan</strong> tujuan sampai disurvei petugas${p.unknown_levels ? ` · <strong>${num(p.unknown_levels)}</strong> gedung relevan belum ada data jumlah lantai` : ''}</div>
+    <div class="small muted">Jam skenario: ${esc((p.time && p.time.label) || '-')}${p.closed_count ? ` · ${num(p.closed_count)} gedung tutup pada jam ini tidak dihitung` : ''}</div></div>`);
+  const al = p.allocation;
+  if (al) {
+    // Alokasi berkapasitas akhir (model yang SAMA dengan rute warga): tidak ada gedung melebihi kapasitas.
+    const t = al.totals || {};
+    const ok = al.status === 'ok';
+    $('#stats').insertAdjacentHTML('beforeend', `<div class="stat ${t.unresolved ? 'bad' : ''}" style="grid-column:1/-1"><div class="small muted">Alokasi berkapasitas (shelter terdaftar + rekomendasi) · ${esc(String(al.method || '').startsWith('lp') ? (al.optimal ? 'LP optimal (HiGHS)' : 'LP, belum terbukti optimal') : 'heuristik greedy (cadangan)')}${al.timing && al.timing.total_s != null ? ` · ${String(al.timing.total_s.toFixed(1)).replace('.', ',')} s` : ''}</div>
+      <div class="small">Ke gedung: <strong>${num(t.to_shelter)}</strong> · ke zona aman (kapasitas tidak diketahui): <strong>${num(t.to_unlimited)}</strong> · tanpa tujuan terjangkau: <strong>${num(t.unresolved)}</strong> · tiba setelah batas waktu: <strong>${num(t.late)}</strong> · kapasitas terpakai ${num(t.capacity_used)} / ${num(t.capacity_total)}</div>
+      ${!ok || (al.errors || []).length ? `<div class="small" style="color:var(--danger)">${esc([al.status === 'gagal' ? 'Alokasi gagal / tidak lolos validasi.' : al.status === 'kurang' ? 'Ada warga tanpa tujuan yang terjangkau.' : '', ...(al.errors || [])].filter(Boolean).join(' · '))}</div>` : ''}
+      <div class="small muted">Urutan rekomendasi: ${esc(p.recommend_method || '-')}. Penduduk = model (bukan data kependudukan).</div></div>`);
+  }
   const max = Math.max(1, ...p.curve.map((c) => c.red_total));
   $('#bars').innerHTML = p.curve.map((c) => `<div style="height:${Math.max(2, (c.red_total / max) * 100)}%"><span>${num(c.red_total)}</span></div>`).join('');
   $('#barsX').innerHTML = p.curve.map((c) => `<span>+${c.k}</span>`).join('');
@@ -66,11 +94,21 @@ function renderPlan() {
   $('#recList').innerHTML = p.recommended.length ? p.recommended.map((r, i) => `<div class="item">
       <div class="head"><div><div class="title">${i + 1}. ${esc(r.name)}</div>
         <div class="small muted">${esc(BKIND[r.kind] || r.kind)} · ${r.levels} lantai · naik minimal lantai ${r.min_floor} · kapasitas lantai aman ± ${num(r.capacity)} orang</div>
-        <div class="small muted">Data lantai: ${esc(SRC[r.levels_src] || r.levels_src)}${r.verified ? ' · disurvei petugas' : ' · belum disurvei'}</div></div></div>
-      <div>Menampung <strong>${num(r.assigned)}</strong> orang yang tadinya tidak sempat <span class="small muted">(${num(r.assigned_umum)} umum, ${num(r.assigned_rentan)} rentan)</span></div>
+        <div class="small muted">Data lantai: ${esc(SRC[r.levels_src] || r.levels_src)}${r.surveyed ? ' · disurvei petugas' : ' · belum disurvei'}${r.min_floor_nominal != null && r.min_floor_nominal !== r.min_floor ? ` · lantai aman nominal ${r.min_floor_nominal}, konservatif ${r.min_floor} (margin elevasi ${r.elev_margin_m} m)` : ''}</div>
+        ${r.tier !== 'verified' ? `<div class="small" style="color:var(--warn,#92400e)"><span class="tier-badge t-unverified">Perlu Verifikasi</span> angka di bawah hanya berlaku SETELAH lolos survei${(r.caveats || []).length ? `: ${esc(r.caveats.join(' · '))}` : ''}</div>` : '<span class="tier-badge t-verified">Terverifikasi</span>'}</div></div>
+      <div>${r.requires_verification ? 'Bila terverifikasi, dapat menampung' : 'Menampung'} <strong>${num(r.assigned)}</strong> orang yang tadinya tidak sempat <span class="small muted">(${num(r.assigned_umum)} umum, ${num(r.assigned_rentan)} rentan)</span></div>
       <div class="row"><button class="btn" type="button" data-act="fly" data-id="${esc(r.id)}">${icon('pin')} Lihat</button>
-        <button class="btn primary" type="button" data-act="reg" data-id="${esc(r.id)}">Daftarkan sebagai shelter</button></div></div>`).join('')
+        ${r.tier === 'verified' ? `<button class="btn primary" type="button" data-act="reg" data-id="${esc(r.id)}">Daftarkan sebagai shelter</button>` : '<span class="small muted">Masuk daftar verifikasi: minta petugas survei (kondisi, struktur beton/baja, akses 24 jam, jumlah lantai, elevasi) sebelum didaftarkan.</span>'}</div></div>`).join('')
     : `<p class="muted">${params().optimize_k ? (r1 ? `Tidak ada gedung yang cukup tinggi dan terjangkau untuk tsunami ${String(p.wave_m).replace('.', ',')} m (syarat: jumlah lantai diketahui, bukan rumah/kayu/bata, lantai teratas ≥ lantai aman).` : 'Semua penghuni sudah sempat pada skenario ini.') : 'Geser “Cari gedung tambahan” untuk mendapat rekomendasi.'}</p>`;
+
+  const vl = p.verification_list || [];
+  $('#verList').innerHTML = vl.length ? vl.slice(0, 12).map((v) => `<div class="item"><div class="head"><div>
+      <div class="title">${esc(v.name)} <span class="tier-badge t-unverified">Perlu Verifikasi</span></div>
+      <div class="small muted">${v.levels} lantai · lantai aman ${v.min_floor}+ · bila terverifikasi ± ${num(v.capacity_if_verified)} orang</div>
+      <div class="small muted">${esc((v.caveats || []).join(' · '))}</div></div></div>
+      <div class="row"><button class="btn" type="button" data-act="fly" data-id="${esc(v.id)}">${icon('pin')} Lihat</button></div></div>`).join('')
+    + (vl.length > 12 ? `<p class="small muted">+ ${num(p.verification_count - 12)} gedung lain.</p>` : '')
+    : '<p class="muted">Tidak ada gedung Perlu Verifikasi yang cukup tinggi pada skenario ini.</p>';
 
   const assigned = new Map(p.shelters.map((s) => [s.id, s]));
   const regs = (S.state && S.state.shelters) || [];
@@ -78,11 +116,14 @@ function renderPlan() {
     const a = assigned.get(s.id);
     return `<div class="item"><div class="head"><div><div class="title">${esc(s.name)}</div>
       <div class="small muted">${s.levels} lantai${a ? ` · naik minimal lantai ${a.min_floor} · kapasitas ± ${num(a.capacity)} · menampung ${num(a.assigned)} orang pada skenario ini` : ''}</div>
-      ${a && !a.usable ? `<div class="small" style="color:var(--danger)">Tidak layak untuk tsunami ${String(p.wave_m).replace('.', ',')} m: ${esc(a.reason || 'lantai kurang tinggi')}. Warga tidak diarahkan ke sini pada skenario ini.</div>` : ''}</div></div>
+      ${a && !a.usable ? `<div class="small" style="color:var(--danger)">Bukan shelter resmi pada skenario tsunami ${String(p.wave_m).replace('.', ',')} m: ${esc(a.reason || 'lantai kurang tinggi')}. Warga tidak diarahkan ke sini sebagai shelter resmi.</div>` : ''}</div></div>
       <div class="row"><button class="btn" type="button" data-act="fly" data-id="${esc(s.id)}">${icon('pin')} Lihat</button>
       <button class="btn ghost" type="button" data-act="unreg" data-id="${esc(s.id)}">Batalkan</button></div></div>`;
   }).join('') : '<p class="muted">Belum ada. Daftarkan dari rekomendasi di atas.</p>';
 
+  // Kapasitas pada peta = angka skenario perencanaan ini (shelter terdaftar + rekomendasi), model alokasi yang sama.
+  S.m.setCapacity([...p.shelters.filter((x) => x.usable), ...p.recommended].map((x) => ({ id: x.id, name: x.name, lat: x.lat, lon: x.lon,
+    capacity: x.capacity, allocated: x.assigned })));
   // warna bangunan
   const st = p.building_status.map((x) => x || 'none');
   for (const r of p.recommended) { const i = S.bindex.get(r.id); if (i != null) st[i] = 'rekom'; }
@@ -147,11 +188,11 @@ function renderInfo() {
     api.get(`/api/buildings/${encodeURIComponent(b.id)}?area=${encodeURIComponent(S.area.meta.id)}`).then((v) => {
       const L = v.levels, x = v.building;
       const el = $('#infoBld'); if (!el) return;
-      el.className = 'vbox' + (x.verified ? ' ver' : '');
+      el.className = 'vbox' + (v.tier === 'verified' ? ' ver' : '');
       el.innerHTML = `<h3>Evakuasi vertikal: ${esc(x.name || BKIND[x.kind] || 'gedung')}</h3>
-        <div class="small">${x.levels} lantai · ${esc(SRC[x.levels_src] || x.levels_src)}${x.height_m ? ` (± ${x.height_m} m)` : ''} · tanah ± ${Math.round(x.elev)} m${x.basement ? ` · ${x.basement} basement (jangan dipakai berlindung)` : ''}</div>
-        <dl class="kv2 small">${['waspada', 'siaga', 'awas'].map((k) => `<dt>${LEVEL_TXT[k]}</dt><dd>${L[k].suitable ? `<strong>Layak</strong> — naik minimal lantai ${L[k].min_floor}, ± ${num(L[k].capacity)} orang` : esc(L[k].reason || 'tidak tergenang')}</dd>`).join('')}</dl>
-        <div class="small muted">Awas memakai skenario ± ${v.design_m} m. ${v.eligible ? '' : esc(v.why) + '.'}</div>`;
+        <div class="small">${x.levels} lantai · ${esc(SRC[x.levels_src] || x.levels_src)}${x.height_m ? ` (± ${x.height_m} m${x.levels_est ? `, perkiraan ÷ ${String(v.height_per_level_m || 4).replace('.', ',')} m per lantai` : ''})` : ''} · ${x.elev == null ? 'elevasi tanah tidak tersedia (dihitung 0 m)' : `tanah ± ${Math.round(x.elev)} m${x.elev_src === 'survei' ? ' (diukur petugas)' : x.elev_conf === 'rendah' ? ' (kurang pasti)' : ''}`}${x.basement ? ` · ${x.basement} basement (jangan dipakai berlindung)` : ''}</div>
+        <dl class="kv2 small">${['waspada', 'siaga', 'awas'].map((k) => `<dt>${LEVEL_TXT[k]}</dt><dd>${L[k].suitable ? `<strong>Lantai ${L[k].min_floor}+</strong>${L[k].min_floor_nominal !== L[k].min_floor ? ` (nominal ${L[k].min_floor_nominal}, margin ${L[k].elev_margin_m} m)` : ''}, ± ${num(L[k].capacity)} orang${L[k].destination ? '' : ' · belum tujuan (Perlu Verifikasi)'}` : esc(L[k].reason || 'tidak tergenang')}</dd>`).join('')}</dl>
+        <div class="small muted">Awas memakai skenario ± ${v.design_m} m. ${v.eligible ? (v.tier === 'verified' ? 'Terverifikasi petugas.' : `<strong>Perlu Verifikasi</strong>: ${esc((v.caveats || []).join(' · '))}.`) : `<strong>Tidak Aman</strong>: ${esc(v.why)}.`}${v.access_now && v.access_now.note ? ` Akses: ${esc(v.access_now.note)}.` : ''}</div>`;
     }).catch(() => { const el = $('#infoBld'); if (el) el.remove(); });
   }
 }
@@ -166,11 +207,15 @@ function renderData() {
     <dt>Sumber</dt><dd>${(a.meta.sources || []).map(esc).join('<br>')}</dd>
     <dt>Zona bahaya</dt><dd style="font-weight:400">${hz}</dd>
     <dt>Tempat aman</dt><dd style="font-weight:400">${a.meta.hazard_method === 'polygon' ? `Di luar poligon bahaya dan ≥ ${p.hazard_edge_buffer_m ?? 50} m dari batasnya.` : `Di luar zona bahaya dan elevasi ≥ ${p.hazard_elev_threshold_m + Math.max(p.safe_buffer_m, p.dem_uncertainty_m || 0)} m (ambang + ${Math.max(p.safe_buffer_m, p.dem_uncertainty_m || 0)} m untuk galat DEM), atau ≥ ${p.hazard_max_coast_dist_m / 1000} km dari pantai.`}</dd>
-    <dt>Evakuasi vertikal</dt><dd style="font-weight:400">Genangan = tinggi tsunami − ketinggian tanah (model “bak mandi”, cenderung melebih-lebihkan). Lantai aman = genangan dibulatkan ke atas + 1 (pedoman Kantor Kabinet Jepang 2005: 2 m → lantai 3, 3 m → lantai 4). Tidak disarankan: jumlah lantai tidak diketahui, rumah pribadi, kayu/bata tanpa rangka beton, tidak bisa dimasuki. Skenario rencana: <strong>ASUMSI</strong> ${p.tsunami_design_height_m ?? 10} m; saat peringatan: Waspada 0,5 m · Siaga 3 m · Awas = skenario rencana, kecuali ada perkiraan resmi.</dd>
+    <dt>Evakuasi vertikal</dt><dd style="font-weight:400">Genangan = tinggi tsunami − ketinggian tanah (model “bak mandi”, cenderung melebih-lebihkan). Lantai aman = genangan dibulatkan ke atas + 1 (pedoman Kantor Kabinet Jepang 2005: 2 m → lantai 3, 3 m → lantai 4). <strong>Keputusan memakai lantai aman konservatif</strong>: ketinggian tanah dikurangi margin galat elevasi (diukur petugas ${(p.elev_margin_m || {}).tinggi ?? 0} m, kepercayaan sedang ${(p.elev_margin_m || {}).sedang ?? 3} m, rendah ${(p.elev_margin_m || {}).rendah ?? 5} m; elevasi tidak tersedia = 0 m). Margin ini <strong>ASUMSI awal</strong> yang perlu divalidasi BPBD. Hanya gedung <strong>Terverifikasi</strong> yang menjadi tujuan rute & alokasi; gedung Perlu Verifikasi = daftar verifikasi. Tidak disarankan: jumlah lantai tidak diketahui, rumah pribadi, kayu/bata tanpa rangka beton, tidak bisa dimasuki. Skenario rencana: <strong>ASUMSI</strong> ${p.tsunami_design_height_m ?? 10} m; saat peringatan: Waspada 0,5 m · Siaga 3 m · Awas = skenario rencana, kecuali ada perkiraan resmi.</dd>
     <dt>Ruas berisiko</dt><dd style="font-weight:400">Di zona bahaya, terowongan/underpass dibebani ×${p.underpass_penalty ?? 10} dan jembatan &lt; ${(p.bridge_coast_m ?? 1500) / 1000} km dari pantai ×${p.bridge_penalty ?? 3}: rute memilih jalan lain bila ada.</dd>
     <dt>Kecepatan</dt><dd style="font-weight:400">1,0 m/detik (umum), 0,5 m/detik (lansia/difabel) — pedoman MLIT Jepang; tanjakan memperlambat menurut fungsi Tobler; tangga 0,21 m/detik vertikal.</dd>
-    <dt>Penduduk</dt><dd style="font-weight:400"><strong>ASUMSI</strong> ${p.persons_per_house} orang per rumah, ${Math.round(p.vulnerable_share * 100)}% rentan. Ganti dengan data kependudukan desa.</dd>
-    <dt>Kapasitas shelter</dt><dd style="font-weight:400">luas × jumlah lantai di atas lantai aman × ${p.shelter_usable_factor} ÷ ${p.space_per_person_m2} m²/orang (FEMA P-646).</dd>
+    <dt>Penduduk</dt><dd style="font-weight:400">${(() => { const pp = a.meta.population || {}; return pp.method === 'grid'
+      ? `${pp.synthetic ? '<strong>SINTETIS (uji)</strong> — ' : ''}${esc(pp.label || 'grid penduduk')} · ± ${num(pp.total)} orang di area${pp.virtual_origins ? ` (${num(pp.virtual_origins)} sel tanpa bangunan terunduh menjadi titik asal di jalan terdekat)` : ''}${pp.unassigned ? ` · ${num(pp.unassigned)} orang tidak bisa ditempatkan` : ''}`
+      : `<strong>PERKIRAAN MODEL</strong> ${p.persons_per_house} orang per rumah (bukan data kependudukan). Unggah grid penduduk ±30 m untuk mengganti.`; })()} ${Math.round(p.vulnerable_share * 100)}% rentan (ASUMSI).</dd>
+    <dt>Kapasitas shelter</dt><dd style="font-weight:400">luas × jumlah lantai di atas lantai aman × ${p.shelter_usable_factor} ÷ ${p.space_per_person_m2} m²/orang (FEMA P-646). Kapasitas membatasi alokasi perencanaan dan rute warga: bila perkiraan penghuni sekitar melebihi kapasitas, sebagian warga diarahkan ke tujuan lain. Luas tidak diketahui = kapasitas 0 (tidak dipakai).</dd>
+    <dt>Jumlah lantai</dt><dd style="font-weight:400">building:levels / survei bila ada. Bila hanya tinggi: lantai = tinggi ÷ ${String(p.height_per_level_m ?? 4).replace('.', ',')} m dibulatkan ke bawah (<strong>perkiraan</strong>; tinggi atap/kubah tidak dihitung; tinggi tempat ibadah tidak dipakai). Perkiraan tidak pernah membuat gedung “Terverifikasi”.</dd>
+    <dt>Akses &amp; jam buka</dt><dd style="font-weight:400">Shelter resmi wajib disurvei: beton/baja, akses 24 jam. Gedung berjam terbatas memakai jam buka hasil survei pada waktu peringatan (zona waktu area: ${esc((S.meta && S.meta.timezone && `${S.meta.timezone.label}, sumber ${S.meta.timezone.src}`) || '-')}). Akses belum diketahui = “Perlu Verifikasi”, tidak dianggap terbuka.</dd>
     <dt>Ukuran data</dt><dd style="font-weight:400">${num(c.nodes || 0)} simpul jalan, ${num(c.edges || 0)} ruas, ${num(c.buildings || 0)} bangunan.</dd>
   </dl>
   <p class="small muted" style="margin:.6rem 0 0">Hasil adalah model untuk perencanaan dan latihan, bukan jaminan keselamatan. Penentuan aman/tidak aman bersifat deterministik (aturan dan perhitungan rute), bukan AI.</p>`;
@@ -178,13 +223,14 @@ function renderData() {
 
 function renderDG() {
   const a = S.area; if (!a || !$('#dgSummary')) return;
-  const nh = a.buildings.filter((b) => b.kind !== 'rumah');
+  const nh = a.buildings.filter((b) => b.survey_prio || b.surveyed || b.tier === 'verified');  // gedung relevan (aturan server)
   const cnt = {};
   nh.forEach((b) => { const k = b.levels_src || 'osm'; cnt[k] = (cnt[k] || 0) + 1; });
-  const ver = nh.filter((b) => b.verified).length;
+  const ver = nh.filter((b) => b.tier === 'verified').length;
+  const sv = nh.filter((b) => b.surveyed).length;
   $('#dgSummary').innerHTML = nh.length
-    ? `<strong>${num(nh.length)}</strong> bangunan non-hunian. Sumber jumlah lantai: ${Object.entries(cnt).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${esc(SRC[k] || k)} ${num(v)}`).join(' · ')}. Disurvei petugas: ${num(ver)}.`
-    : 'Belum ada data bangunan non-hunian di area ini.';
+    ? `<strong>${num(nh.length)}</strong> gedung relevan untuk evakuasi vertikal. Sumber jumlah lantai: ${Object.entries(cnt).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${esc(SRC[k] || k)} ${num(v)}`).join(' · ')}. Disurvei petugas: ${num(sv)} · terverifikasi: ${num(ver)}.`
+    : 'Belum ada data gedung relevan di area ini.';
   $('#dgSummary').insertAdjacentHTML('beforeend', `<br>Zona bahaya: ${a.meta.hazard_method === 'polygon' ? 'peta resmi (unggahan)' : '<strong>perkiraan aturan</strong> — unggah peta bahaya resmi bila ada'}.`);
   const [w, s2, e, n] = a.meta.bbox;
   $('#bboxTxt').textContent = `[${[w, s2, e, n].map((v) => v.toFixed(5)).join(', ')}]`;
@@ -202,6 +248,23 @@ async function uploadGeo(input, kind) {
       ? `Peta bahaya dipakai: ${r.polygons} poligon · ${num(r.hazard_nodes)} simpul jalan di zona bahaya · ${num(r.safe_nodes)} simpul tujuan aman.`
       : `Tinggi gedung: ${r.updated} diperbarui, ${r.added} gedung baru, ${r.kept} tidak ditimpa (sudah ada data lebih dipercaya), ${r.unmatched} tidak cocok.`;
   } catch (e) { msg.textContent = e instanceof SyntaxError ? 'Berkas bukan GeoJSON yang valid.' : e.message; }
+  input.value = '';
+}
+
+// Grid penduduk: CSV mentah dikirim apa adanya (bisa puluhan MB). Berlaku untuk SEMUA area yang dicakupnya.
+async function uploadPop(input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  const msg = $('#dgMsg');
+  if (f.size > 200 * 1024 * 1024) { msg.textContent = 'Berkas terlalu besar (maks. 200 MB). Potong ke wilayah kerja dulu.'; input.value = ''; return; }
+  const gid = (f.name.toLowerCase().replace(/\.csv$/, '').replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'grid').slice(0, 40);
+  const q = new URLSearchParams({ gid: gid.length >= 2 ? gid : `grid-${gid}`, name: f.name.slice(0, 120) });
+  msg.innerHTML = '<span class="spinner"></span> Mengunggah grid penduduk…';
+  try {
+    const res = await fetch(`/api/population?${q}`, { method: 'POST', body: f, headers: { 'Content-Type': 'text/csv', Authorization: `Bearer ${api.token}` } });
+    const r = await res.json();
+    if (!res.ok) throw new Error(typeof r.detail === 'string' ? r.detail : `Gagal (${res.status})`);
+    msg.textContent = `Grid penduduk ${r.grid.name}: ${num(r.grid.count)} sel, total ± ${num(r.grid.total)} orang, dipakai di ${r.areas.length} area. Alokasi dihitung ulang.`;
+  } catch (e) { msg.textContent = e.message; }
   input.value = '';
 }
 
@@ -278,7 +341,10 @@ async function startDash(user) {
   ['eta', 'delay', 'margin', 'k', 'wave'].forEach((id) => $('#' + id).addEventListener('input', schedule));
   $('#hazFile').addEventListener('change', (ev) => uploadGeo(ev.target, 'hazard'));
   $('#hgtFile').addEventListener('change', (ev) => uploadGeo(ev.target, 'heights'));
+  $('#popFile').addEventListener('change', (ev) => uploadPop(ev.target));
+  $('#tgMode').addEventListener('change', () => loadTimeGrid());
   $('#useReg').addEventListener('change', schedule);
+  $('#scnTime').addEventListener('change', schedule);
   S.sync = new Sync({
     areaId: store.get('sempat_perencana_area', null),
     onArea: (area, meta) => {
@@ -292,19 +358,32 @@ async function startDash(user) {
       if (firstLoad || !$('#eta').value) $('#eta').value = Math.round((area.params && area.params.default_eta_min) || 20);
       if (firstLoad || !$('#wave').value) $('#wave').value = (area.params && area.params.tsunami_design_height_m) || 10;
       if (!S.m) {
-        S.m = createMap($('#map'), area, { buildingsColor: 'plan', hazardRoads: false });
+        // Preset perencana: hazard, kepadatan penduduk, waktu evakuasi, kapasitas shelter, distribusi (warna bangunan).
+        S.m = createMap($('#map'), area, { buildingsColor: 'plan', hazardRoads: false,
+          groups: ['bangunan', 'kelayakan', 'bangunan3d', 'bahaya', 'penduduk', 'waktu', 'shelter', 'jalan', 'penanda'],
+          defaults: ['bangunan', 'bahaya', 'shelter', 'penanda', 'penduduk'] });
         S.m.map.on('click', (ev) => {
-          const f = S.m.map.queryRenderedFeatures(ev.point, { layers: ['bld'] })[0];
-          const b = f ? S.area.buildings[S.bindex.get(f.properties.id)] : null;
+          const bid = S.m.buildingAt(ev.point);
+          const b = bid ? S.area.buildings[S.bindex.get(bid)] : null;
           if (b) pointInfo(b.lat, b.lon, b); else pointInfo(ev.lngLat.lat, ev.lngLat.lng, null);
         });
-        S.m.map.on('mousemove', (ev) => { S.m.map.getCanvas().style.cursor = S.m.map.queryRenderedFeatures(ev.point, { layers: ['bld'] }).length ? 'pointer' : ''; });
+        S.m.map.on('mousemove', (ev) => { S.m.map.getCanvas().style.cursor = S.m.buildingAt(ev.point) ? 'pointer' : ''; });
       } else S.m.setArea(area);
+      api.get(`/api/areas/${encodeURIComponent(area.meta.id)}/population`).then((r) => S.m.setPopulation(r.cells)).catch(() => S.m.setPopulation(null));
+      loadTimeGrid();
       S.m.setRoute(null);
       $('#infoEmpty').classList.remove('hidden'); $('#infoBody').classList.add('hidden');
       S.m.setOfficial(area.official_points);
-      renderData(); renderDG(); labels();
+      renderData(); renderDG(); labels(); evidenceLink();
     },
+    onAreaPatch: (area, changed, removed) => {
+      S.area = area;
+      S.bindex = new Map(); area.buildings.forEach((b, i) => S.bindex.set(b.id, i));
+      S.m.patchBuildings(area, changed, removed);
+      renderData();
+      S.m.ready.then(calc);  // hasil survei mengubah tier/kapasitas gedung: hitung ulang rencana
+    },
+    onTables: () => loadTimeGrid(),  // grid waktu mengikuti versi tabel rute (shelter/jalan putus/peringatan)
     onState: (st) => {
       if (S.area && st.area_id !== S.area.meta.id) return;
       S.state = st;
@@ -323,9 +402,12 @@ async function main() {
   if (api.token) {
     try { const r = await api.get('/api/auth/me'); if (['perencana', 'admin'].includes(r.user.role)) return startDash(r.user); } catch { api.logout(); }
   }
+  const meta = await api.get('/api/meta').catch(() => null);  // akun demo hanya ada di server lokal
   renderLogin($('#root'), {
     title: 'Masuk — Perencana BPBD', roles: ['perencana'],
-    hint: 'Akun demo: <strong>perencana</strong> / <strong>perencana123</strong>.',
+    hint: meta && meta.demo_accounts
+      ? 'Akun demo: <strong>perencana</strong> / <strong>perencana123</strong>.'
+      : 'Masuk dengan akun yang diberikan pengelola server.',
     onDone: startDash,
   });
 }

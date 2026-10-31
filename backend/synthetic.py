@@ -240,6 +240,8 @@ def build(log=print) -> dict:
         sources=["DATA SINTETIS untuk uji sistem — bukan desa nyata"],
         display={"sea": [sea_ll]}, log=log,
     )
+    # Desa fiktif (bujur 112,5° BT = WIB): zona waktu ditulis eksplisit agar jam buka gedung tidak ditebak dari bujur.
+    area["meta"].update(timezone="Asia/Jakarta", timezone_src="eksplisit")
     return area
 
 

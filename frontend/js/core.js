@@ -103,13 +103,112 @@ export function isHazard(area, idx, pos) {
   return area.nodes.hazard[node] === 1;
 }
 
+// ---------------------------------------------------------------- alokasi kapasitas (sama dengan server)
+// Server mengalokasikan penduduk model ke gedung berkapasitas (backend/allocation.py). Sebagian besar asal cukup
+// diwakili tabel (offset dual pen_s per tujuan). Bangunan yang alokasinya tidak bisa diwakili tabel (dipecah ke
+// beberapa tujuan / seri) dikirim sebagai `overrides`; HP di bangunan itu memilih satu opsi dengan hash stabil ID
+// perangkat (porsi = jumlah orang) dan MENGUNCI jalurnya sampai hasil alokasi berganti.
+export const OVERRIDE_RADIUS_M = 25;   // sama dengan Engine.OVERRIDE_RADIUS_M
+export const LOCK_LEAVE_M = 150;       // menyimpang lebih jauh dari jalur terkunci -> kunci dilepas
+
+// FNV-1a 32-bit atas UTF-8 "key|originKey" -> indeks opsi berbobot jumlah orang. SAMA dengan allocation.pick_option.
+export function pickOption(key, originKey, counts) {
+  const tot = counts.reduce((a, b) => a + b, 0);
+  if (tot <= 0) return 0;
+  let h = 0x811c9dc5;
+  for (const b of new TextEncoder().encode(`${key}|${originKey}`)) {
+    h ^= b;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  const u = (h / 4294967296) * tot;
+  let acc = 0;
+  for (let i = 0; i < counts.length; i++) {
+    acc += counts[i];
+    if (u < acc) return i;
+  }
+  return counts.length - 1;
+}
+
+// Penanda hasil alokasi: kunci rute hanya berlaku untuk hasil yang sama.
+export function allocStamp(bundle, mode) {
+  const c = bundle && bundle.capacity && bundle.capacity[mode];
+  return c && c.computed_at ? `${bundle.area_id || ''}|${mode}|${c.computed_at}` : null;
+}
+
+export function overrideAt(area, bundle, mode, group, s) {
+  const recs = bundle && bundle.overrides && bundle.overrides[`${mode}-${group}`];
+  if (!recs || !recs.length || !s) return null;
+  // Yang terdekat di ruas yang sama dalam radius (seri: urutan daftar) — sama dengan Engine._override_at.
+  const L = area.edges.len[s.e];
+  let best = null, bd = Infinity;
+  for (const r of recs) {
+    if (r.e !== s.e) continue;
+    const d = Math.abs(r.t - s.t) * L;
+    if (d <= OVERRIDE_RADIUS_M && d < bd) { best = r; bd = d; }
+  }
+  return best;
+}
+
+function lockDest(area, bundle, mode, opt) {
+  const list = (bundle.dests && bundle.dests[mode]) || [];
+  const last = opt.nodes[opt.nodes.length - 1];
+  if (opt.d >= 0 && list[opt.d] && list[opt.d].lat != null) return list[opt.d];
+  const safe = area.nodes.safe[last] === 1;
+  return { type: safe ? 'safe_zone' : 'tanah_tinggi', name: safe ? 'Zona aman' : 'Tanah lebih tinggi',
+    lat: area.nodes.lat[last], lon: area.nodes.lon[last], elev: area.nodes.elev[last] };
+}
+
+// Rute sepanjang jalur terkunci dari posisi sekarang (titik jalur terdekat lalu sisa jalur).
+export function routeFromLock(area, lock, pos) {
+  if (!lock || !lock.nodes || !lock.nodes.length) return null;
+  let bi = 0, bd = Infinity;
+  for (let i = 0; i < lock.nodes.length; i++) {
+    const x = lock.nodes[i];
+    const d = haversine(pos.lat, pos.lon, area.nodes.lat[x], area.nodes.lon[x]);
+    if (d < bd) { bd = d; bi = i; }
+  }
+  if (bd > LOCK_LEAVE_M) return null;
+  const coords = [[pos.lon, pos.lat], ...lock.nodes.slice(bi).map((x) => [area.nodes.lon[x], area.nodes.lat[x]])];
+  if (lock.dest && lock.dest.lat != null && lock.d >= 0) coords.push([lock.dest.lon, lock.dest.lat]);
+  const L = polylineLength(coords);
+  // Waktu: waktu jalur alokasi dikali porsi jarak tersisa (perkiraan; jalur penuh = waktu server).
+  const timeS = lock.s * Math.min(1, L / Math.max(1, lock.len));
+  return { ok: true, coords, timeS, distM: L, dest: lock.dest, allocation: lock.allocation, locked: true };
+}
+
 // Rute dari tabel: pilih ujung ruas terbaik lalu ikuti pointer "next" sampai tujuan.
-export function routeFromTable(area, idx, bundle, mode, group, pos) {
+// opt.deviceKey: ID perangkat (memilih opsi asal yang dipecah); opt.lock: kunci yang tersimpan (lihat res.lock).
+export function routeFromTable(area, idx, bundle, mode, group, pos, opt = {}) {
   const key = `${mode}-${group}`;
   const tab = bundle && bundle.tables && bundle.tables[key];
   if (!tab) return { ok: false, reason: 'Data rute belum tersedia.' };
   const s = idx.nearest(pos.lat, pos.lon);
   if (!s) return { ok: false, reason: 'Posisi di luar peta.' };
+  if (mode === 'aman' || mode === 'gedung') {
+    const stamp = allocStamp(bundle, mode);
+    const lk = opt.lock;
+    if (lk && stamp && lk.stamp === stamp && lk.group === group) {
+      const r = routeFromLock(area, lk, pos);
+      if (r) return r;
+    }
+    const rec = overrideAt(area, bundle, mode, group, s);
+    if (rec) {
+      const allocation = { origin: rec.o, unresolved: rec.unres || 0 };
+      if (!rec.opts || !rec.opts.length) {
+        return { ok: false, reason: 'Tidak ada tujuan yang masih memiliki kapasitas dan terjangkau dari sini.', allocation };
+      }
+      const counts = rec.opts.map((o) => o.n);
+      const i = opt.deviceKey ? pickOption(opt.deviceKey, rec.o, counts) : counts.indexOf(Math.max(...counts));
+      const o = rec.opts[i];
+      Object.assign(allocation, { option: i, shares: counts });
+      const dest = lockDest(area, bundle, mode, o);
+      const coords = [[pos.lon, pos.lat], [s.lon, s.lat], ...o.nodes.map((x) => [area.nodes.lon[x], area.nodes.lat[x]])];
+      if (o.d >= 0 && dest.lat != null) coords.push([dest.lon, dest.lat]);
+      const distM = polylineLength(coords);
+      const lock = { stamp, mode, group, o: rec.o, d: o.d, nodes: o.nodes, s: o.s, len: distM, dest, allocation };
+      return { ok: true, coords, timeS: o.s, distM, dest, snapped: s, allocation, lock, locked: true };
+    }
+  }
   const sp = SPEED[group];
   const ec = bundle.edge_cost && bundle.edge_cost[group];
   let opts;
@@ -145,7 +244,27 @@ export function routeFromTable(area, idx, bundle, mode, group, pos) {
   } else {
     dest = { type: 'safe_zone', name: 'Zona aman', lat: area.nodes.lat[x], lon: area.nodes.lon[x], elev: area.nodes.elev[x] };
   }
-  return { ok: true, coords, timeS: best.total, distM: polylineLength(coords), dest, snapped: s };
+  // Penalti kapasitas (server) hanya untuk memilih tujuan yang masih muat; waktu tempuh yang tampil tanpa penalti.
+  const timeS = best.total - (dest.pen_s || 0);
+  return { ok: true, coords, timeS, distM: polylineLength(coords), dest, snapped: s };
+}
+
+// Status daya tampung untuk ditampilkan ke warga: null bila alokasi sudah dihitung dan semua tertampung.
+export function capacityNote(bundle, mode) {
+  const c = bundle && bundle.capacity && bundle.capacity[mode];
+  if (!c) return { level: 'unknown', text: 'Daya tampung gedung belum diperhitungkan pada data rute ini.' };
+  switch (c.status) {
+    case 'pending': return { level: 'pending', text: 'Daya tampung gedung sedang dihitung. Sementara ini rute ke tujuan terdekat, belum memperhitungkan kapasitas.' };
+    case 'tanpa_penduduk': return { level: 'unknown', text: 'Data penduduk tidak tersedia: daya tampung gedung TIDAK diperhitungkan pada rute ini.' };
+    case 'gagal': return { level: 'error', text: 'Perhitungan daya tampung gagal: rute ke tujuan terdekat tanpa memperhitungkan kapasitas.' };
+    case 'kurang': return { level: 'short', text: 'Tempat aman yang terjangkau tidak cukup untuk semua warga. Ikuti arahan petugas.' };
+    default: return null;
+  }
+}
+
+// Tabel rute dihitung untuk jam buka gedung pada waktu tertentu; sesudah valid_until (detik unix) bisa usang.
+export function tablesStale(bundle, nowMs = Date.now()) {
+  return !!(bundle && bundle.valid_until && nowMs / 1000 >= bundle.valid_until);
 }
 
 export function polylineLength(coords) {
@@ -237,11 +356,27 @@ export function clockTime(iso) {
   return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
 }
 
-// Penilaian apakah sempat: dibandingkan sisa waktu sebelum gelombang tiba.
-export function verdict(routeS, remainingS) {
+// ---------------- Batas waktu evakuasi: SATU definisi dengan backend (Engine.deadline_policy) ----------------
+// Batas tiba = waktu peringatan + ETA - margin. Alokasi/perencana mengasumsikan warga mulai bergerak start_delay_s
+// setelah peringatan (anggaran jalan = ETA - jeda - margin); HP memakai waktu sekarang yang nyata, sehingga pada
+// detik ke-start_delay_s keduanya memberi keputusan "terlambat" yang sama (diuji di tests/js/core.test.mjs).
+export const DEFAULT_DEADLINE = { margin_s: 120, start_delay_s: 300, default_eta_min: 20 };
+export function deadlinePolicy(tables) {
+  return { ...DEFAULT_DEADLINE, ...((tables && tables.deadline) || {}) };
+}
+// Terlambat = tiba setelah batas tiba (sisa waktu dikurangi margin). Dipakai verdict DAN tawaran gedung.
+export function isLate(routeS, remainingS, marginS = DEFAULT_DEADLINE.margin_s) {
+  return remainingS != null && routeS > remainingS - marginS;
+}
+// Penilaian: ok = tiba sebelum batas tiba; mepet = di dalam margin (sebelum ETA); terlambat = setelah ETA.
+export function verdict(routeS, remainingS, marginS = DEFAULT_DEADLINE.margin_s) {
   if (remainingS == null) return { level: 'unknown', text: 'Perkiraan waktu tiba gelombang belum tersedia. Tetap bergegas.' };
   if (remainingS <= 0) return { level: 'late', text: 'Perkiraan waktu tiba sudah lewat. Tetap di tempat tinggi dan terus naik.' };
-  if (routeS <= remainingS - 120) return { level: 'ok', text: 'Anda diperkirakan sempat. Terus bergerak, jangan berhenti.' };
+  if (!isLate(routeS, remainingS, marginS)) return { level: 'ok', text: 'Anda diperkirakan sempat. Terus bergerak, jangan berhenti.' };
   if (routeS <= remainingS) return { level: 'tight', text: 'Waktunya mepet. Bergegas sekarang.' };
   return { level: 'late', text: 'Waktu tidak cukup ke tempat tinggi. Naik ke lantai teratas gedung kokoh terdekat.' };
 }
+
+// ---------------- Tingkat kepastian gedung (SATU definisi dari server: tsunami.verification) ----------------
+export const TIER_LABEL = { verified: 'Terverifikasi', unverified: 'Perlu Verifikasi', unsafe: 'Tidak Aman' };
+export function tierOf(b) { return (b && TIER_LABEL[b.tier]) ? b.tier : 'unverified'; }

@@ -14,7 +14,9 @@ import math
 GROUP_SPEED_MPS = {"umum": 1.0, "rentan": 0.5}
 GROUPS = tuple(GROUP_SPEED_MPS.keys())
 STAIR_VERTICAL_MPS = 0.21
-FLOOR_HEIGHT_M = 3.0
+# Bawaan tinggi per lantai = params height_per_level_m (4 m, keputusan proyek). Satu nilai untuk perkiraan lantai
+# dari tinggi gedung DAN waktu naik tangga (tsunami.floor_height_m); di sini hanya cadangan tanpa params.
+FLOOR_HEIGHT_M = 4.0
 MAX_ABS_SLOPE = 1.0  # batas kemiringan agar data elevasi yang kasar tidak membuat nilai ekstrem
 
 _W0 = 6.0 * math.exp(-3.5 * 0.05)

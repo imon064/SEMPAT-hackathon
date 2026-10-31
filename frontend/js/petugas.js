@@ -1,15 +1,23 @@
 // Aplikasi petugas SAR/BPBD: peringatan, titik bantuan, jalan putus.
 /* global maplibregl, qrcode */
-import { api, Sync, createMap, icon, esc, $, $$, toast, registerSW, renderLogin, confirmDialog, store, AREA_KIND,
-  STATUS_LABEL, SERVICE_LABEL, KIND_LABEL } from './common.js';
+import { api, Sync, createMap, capacityPoints, TIER, icon, esc, $, $$, toast, registerSW, renderLogin, confirmDialog, store,
+  AREA_KIND, STATUS_LABEL, SERVICE_LABEL, KIND_LABEL } from './common.js';
 import { clockTime, timeAgo, remainingSeconds } from './core.js';
 
-const S = { area: null, meta: null, state: null, m: null, mode: null, tmp: null, offset: 0, html: {} };
+const S = { area: null, meta: null, state: null, m: null, mode: null, tmp: null, offset: 0, html: {}, capMode: 'aman', capAll: false };
 const STATUSES = ['kosong', 'agak_ramai', 'ramai', 'penuh', 'tutup'];
 const LEVEL_TXT = { waspada: 'Waspada (< 0,5 m)', siaga: 'Siaga (0,5–3 m)', awas: 'Awas (> 3 m)' };
 const STRUCT = { beton: 'Beton bertulang', baja: 'Rangka baja', bata: 'Bata tanpa rangka beton', ringan: 'Kayu / bambu / semi-permanen', tidak_tahu: 'Tidak tahu' };
-const ACCESS = { '24jam': 'Bisa dimasuki 24 jam', jam_kerja: 'Hanya jam kerja/ibadah', tidak: 'Tidak bisa dimasuki umum' };
-const SRC = { survey: 'Survei petugas', osm: 'OpenStreetMap (jumlah lantai)', osm_height: 'OpenStreetMap (tinggi)', google: 'Google Open Buildings 2.5D (perkiraan)', upload: 'Unggahan perencana', default: 'Tidak ada data' };
+const ACCESS = { '24jam': 'Bisa dimasuki 24 jam', jam_kerja: 'Hanya pada jam tertentu (isi jam buka)', tidak: 'Tidak bisa dimasuki umum' };
+const DAYS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+// Elevasi tanah gedung dari server: null = tidak tersedia (genangan dihitung dari 0 m, konservatif).
+const elevTxt = (b) => (b.elev == null ? 'elevasi tanah tidak tersedia (dihitung 0 m)'
+  : `tanah ± ${b.elev_src === 'survei' ? b.elev : Math.round(b.elev)} m${b.elev_src === 'survei' ? ' (diukur petugas)' : b.elev_conf === 'rendah' ? ' (kurang pasti)' : ' (peta DEM)'}`);
+// Kondisi bangunan & metode ukur elevasi: sama dengan backend (tsunami.CONDITIONS, tsunami.ELEV_METHODS).
+const COND = { baik: 'Baik', rusak_ringan: 'Rusak ringan', rusak_berat: 'Rusak berat', dalam_pembangunan: 'Dalam pembangunan', terbengkalai: 'Terbengkalai' };
+const ELEV_METHOD = { gnss_geodetik: 'GNSS geodetik (RTK/statik)', benchmark: 'Diikat ke titik tinggi (BM)', survei_topografi: 'Survei topografi (total station/waterpass)' };
+const surveyed = (b) => !!(b.surveyed || b.verified);
+const SRC = { survey: 'Survei petugas', osm: 'OpenStreetMap (jumlah lantai)', osm_part: 'OpenStreetMap (bagian gedung)', osm_height: 'OpenStreetMap (tinggi, perkiraan)', google: 'Google Open Buildings 2.5D (perkiraan)', upload: 'Unggahan perencana', default: 'Tidak ada data' };
 const now = () => Date.now() + S.offset;
 const setHTML = (el, h) => { if (S.html[el.id] !== h) { el.innerHTML = h; S.html[el.id] = h; } };
 const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
@@ -243,34 +251,56 @@ async function areaDialog() {
 // ------------------------------------------------------------------ survei gedung (evakuasi vertikal tsunami)
 function renderSurveyList() {
   const el = $('#surveyList'); if (!el || !S.area) return;
-  const bl = S.area.buildings.filter((b) => b.kind !== 'rumah' && ((b.levels || 1) >= 2 || b.verified));
-  const ver = bl.filter((b) => b.verified).length;
-  const todo = bl.filter((b) => !b.verified).sort((a, b) => (b.levels - a.levels) || (b.hazard - a.hazard)).slice(0, 6);
-  setHTML(el, `<p class="small" style="margin:0">${ver} dari ${bl.length} gedung bertingkat sudah disurvei.${bl.length ? '' : ' Belum ada gedung bertingkat tercatat di peta wilayah ini — ketuk gedung di peta untuk menambah data.'}</p>
-    ${todo.length ? `<div class="small muted">Prioritas (paling tinggi, belum disurvei):</div>${todo.map((b) => `<button type="button" class="item" data-act="survey" data-id="${esc(b.id)}" style="text-align:left;cursor:pointer">
-      <span class="title">${esc(b.name || 'Gedung tanpa nama')}</span><span class="small muted">${b.levels} lantai · ${esc(SRC[b.levels_src] || b.levels_src)}${b.hazard ? ' · di zona bahaya' : ''}</span></button>`).join('')}` : ''}`);
+  // Prioritas survei = aturan server (survey_prio): gedung bertingkat bukan rumah, termasuk fasilitas umum/gedung
+  // besar yang jumlah lantainya belum diketahui.
+  const bl = S.area.buildings.filter((b) => b.survey_prio || surveyed(b) || b.tier === 'verified');
+  const ver = bl.filter((b) => b.tier === 'verified').length;
+  const sv = bl.filter(surveyed).length;
+  // Prioritas = belum terverifikasi (tier dari server), termasuk yang sudah disurvei tetapi belum lengkap.
+  const todo = bl.filter((b) => b.tier !== 'verified' && b.tier !== 'unsafe')
+    .sort((a, b) => (b.hazard - a.hazard) || (b.levels - a.levels)).slice(0, 6);
+  const why = (b) => (b.tier_reasons || []).filter((x) => x !== 'Belum disurvei petugas').slice(0, 2).join(' · ');
+  setHTML(el, `<p class="small" style="margin:0"><strong>${ver}</strong> terverifikasi · ${sv} sudah disurvei · ${bl.length} gedung relevan.${bl.length ? '' : ' Belum ada gedung bertingkat tercatat di peta wilayah ini — ketuk gedung di peta untuk menambah data.'}</p>
+    ${todo.length ? `<div class="small muted">Daftar verifikasi (zona bahaya dulu, lalu paling tinggi):</div>${todo.map((b) => `<button type="button" class="item" data-act="survey" data-id="${esc(b.id)}" style="text-align:left;cursor:pointer">
+      <span class="title">${esc(b.name || 'Gedung tanpa nama')} <span class="tier-badge t-unverified">Perlu Verifikasi</span></span><span class="small muted">${surveyed(b) ? 'disurvei, belum lengkap · ' : ''}${b.levels_src === 'default' ? 'jumlah lantai belum diketahui' : `${b.levels} lantai · ${esc(SRC[b.levels_src] || b.levels_src)}`}${b.hazard ? ' · di zona bahaya' : ''}${why(b) ? ` · ${esc(why(b))}` : ''}</span></button>`).join('')}` : ''}`);
 }
 
 async function surveyDialog(bid) {
   let v;
   try { v = await api.get(`/api/buildings/${encodeURIComponent(bid)}?area=${encodeURIComponent(S.area.meta.id)}`); } catch (e) { toast(e.message, true); return; }
   const b = v.building, L = v.levels;
-  const row = (k) => `<tr><td>${esc(LEVEL_TXT[k])}</td><td>${L[k].depth_m > 0 ? `± ${esc(String(L[k].depth_m).replace('.', ','))} m` : '–'}</td><td>${L[k].suitable ? `<strong>Layak</strong> · lantai ${L[k].min_floor}+` : esc(L[k].reason || 'Tidak tergenang')}</td></tr>`;
+  const nom = (x) => (x.min_floor_nominal != null && x.min_floor_nominal !== x.min_floor ? ` (nominal ${x.min_floor_nominal})` : '');
+  const row = (k) => `<tr><td>${esc(LEVEL_TXT[k])}</td><td>${L[k].depth_m > 0 ? `± ${esc(String(L[k].depth_m).replace('.', ','))} m` : '–'}${L[k].elev_margin_m ? `<br><span class="muted">+ margin ${esc(L[k].elev_margin_m)} m</span>` : ''}</td><td>${L[k].suitable ? `<strong>Lantai ${L[k].min_floor}+</strong>${esc(nom(L[k]))}${L[k].tier === 'verified' ? '' : ' · belum jadi tujuan (Perlu Verifikasi)'}` : esc(L[k].reason || 'Tidak tergenang')}</td></tr>`;
+  const measuredLevels = b.levels_src === 'survey';
   const d = document.createElement('dialog');
   d.innerHTML = `<form class="dlg" method="dialog">
     <h2>Survei gedung: ${esc(b.name || 'tanpa nama')}</h2>
-    <p class="small muted" style="margin:0">Data saat ini: ${esc(b.levels)} lantai — ${esc(SRC[b.levels_src] || b.levels_src)}${b.height_m ? ` (tinggi ± ${esc(b.height_m)} m)` : ''} · tanah ± ${esc(Math.round(b.elev))} m${b.hazard ? ' · zona bahaya' : ''}</p>
+    <p class="small muted" style="margin:0">Data saat ini: ${esc(b.levels)} lantai — ${esc(SRC[b.levels_src] || b.levels_src)}${b.height_m ? ` (tinggi ± ${esc(b.height_m)} m${b.levels_est ? `, perkiraan ÷ ${esc(String(v.height_per_level_m || 4).replace('.', ','))} m per lantai` : ''})` : ''} · ${esc(elevTxt(b))}${b.hazard ? ' · zona bahaya' : ''}</p>
+    <p class="small" style="margin:0"><strong>${esc(v.tier_label || '')}</strong>${(v.caveats || []).length ? ` — ${esc(v.caveats.join(' · '))}` : ''}</p>
     <table class="small" style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left">Tingkat</th><th style="text-align:left">Genangan</th><th style="text-align:left">Evakuasi vertikal</th></tr></thead>
       <tbody>${row('waspada')}${row('siaga')}${row('awas')}</tbody></table>
     <p class="small muted" style="margin:0">Awas memakai skenario rencana ± ${esc(v.design_m)} m. Lantai minimum: genangan 2 m → lantai 3, 3 m → lantai 4 (pedoman Jepang).</p>
     <div class="row">
-      <label class="field grow">Jumlah lantai di atas tanah<input type="number" name="levels" min="1" max="200" value="${esc(b.levels)}" required></label>
+      <label class="field grow">Jumlah lantai di atas tanah (dihitung di lokasi)<input type="number" name="levels" min="1" max="200" value="${measuredLevels ? esc(b.levels) : ''}" placeholder="${b.levels_src === 'default' ? 'belum ada data' : `data peta: ${esc(b.levels)}${b.levels_est ? ' (perkiraan)' : ''}`}"></label>
       <label class="field grow">Lantai basement<input type="number" name="basement" min="0" max="10" value="${esc(b.basement || 0)}"></label>
     </div>
+    <label class="check"><input type="checkbox" name="lvok" ${measuredLevels ? 'checked' : ''}> Jumlah lantai saya hitung langsung di lokasi (bukan dari peta)</label>
+    <fieldset class="radio-cards" style="border:0;padding:0;margin:0"><legend class="small muted" style="margin-bottom:.3rem">Kondisi bangunan (wajib)</legend>
+      ${Object.entries(COND).map(([k, t], i) => `<label><input type="radio" name="cond" value="${k}" ${b.condition === k ? 'checked' : ''} ${i === 0 ? 'required' : ''}><span>${esc(t)}</span></label>`).join('')}</fieldset>
+    <div class="row">
+      <label class="field grow">Elevasi tanah terukur (m, opsional)<input type="number" name="gelev" step="0.01" min="-20" max="3000" value="${b.elev_src === 'survei' ? esc(b.elev) : ''}" placeholder="kosongkan bila tidak diukur"></label>
+      <label class="field grow">Metode ukur<select name="gmeth"><option value="">—</option>${Object.entries(ELEV_METHOD).map(([k, t]) => `<option value="${k}" ${b.elev_method === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+    </div>
+    <p class="small muted" style="margin:0">Tanpa elevasi terukur, lantai aman memakai margin galat peta (sedang 3 m, rendah 5 m). GPS HP tidak cukup teliti untuk isian ini.</p>
     <fieldset class="radio-cards" style="border:0;padding:0;margin:0"><legend class="small muted" style="margin-bottom:.3rem">Struktur utama</legend>
       ${Object.entries(STRUCT).map(([k, t]) => `<label><input type="radio" name="st" value="${k}" ${(b.structure || 'tidak_tahu') === k ? 'checked' : ''}><span>${esc(t)}</span></label>`).join('')}</fieldset>
     <fieldset class="radio-cards" style="border:0;padding:0;margin:0"><legend class="small muted" style="margin-bottom:.3rem">Akses ke lantai atas saat darurat</legend>
-      ${Object.entries(ACCESS).map(([k, t]) => `<label><input type="radio" name="ac" value="${k}" ${(b.access || '24jam') === k ? 'checked' : ''}><span>${esc(t)}</span></label>`).join('')}</fieldset>
+      ${Object.entries(ACCESS).map(([k, t], i) => `<label><input type="radio" name="ac" value="${k}" ${b.access === k ? 'checked' : ''} ${i === 0 ? 'required' : ''}><span>${esc(t)}</span></label>`).join('')}</fieldset>
+    <div id="svHours" class="stack" style="gap:.3rem;${b.access === 'jam_kerja' ? '' : 'display:none'}">
+      <label class="field">Jam buka sebenarnya (waktu setempat)<input type="text" name="hours" maxlength="80" value="${esc(b.open_hours || '')}" placeholder="contoh: 07:00-16:00 atau 04:30-06:00, 11:30-20:00"></label>
+      <div class="row small">${DAYS.map((t, i) => `<label class="check"><input type="checkbox" name="day" value="${i}" ${!b.open_days || String(b.open_days).includes(String(i)) ? 'checked' : ''}> ${t}</label>`).join('')}</div>
+      <p class="small muted" style="margin:0">Saat peringatan di luar jam ini, gedung tidak diarahkan ke warga. Tempat ibadah/fasilitas umum tidak otomatis dianggap 24 jam.</p>
+    </div>
     <div class="row">
       <label class="check"><input type="checkbox" name="roof" ${b.roof ? 'checked' : ''}> Atap datar bisa dipakai</label>
       <label class="check"><input type="checkbox" name="slf" ${b.slf ? 'checked' : ''}> Punya Sertifikat Laik Fungsi (SLF)</label>
@@ -278,7 +308,7 @@ async function surveyDialog(bid) {
     <label class="field">Catatan (opsional)<input type="text" name="note" maxlength="200" value="${esc((b.survey && b.survey.note) || '')}" placeholder="contoh: tangga darurat di sisi timur, kunci dipegang marbot"></label>
     <p class="small muted" style="margin:0">Bangunan kayu/bata tanpa rangka beton dan gedung yang tidak bisa dimasuki tidak akan disarankan ke warga.</p>
     <p class="small" role="alert" id="svErr" style="color:var(--danger)"></p>
-    <div class="actions">${b.verified ? '<button class="btn ghost" type="button" data-clear>Hapus survei</button>' : ''}<button class="btn" type="button" data-x>Batal</button><button class="btn primary" type="submit">Simpan survei</button></div>
+    <div class="actions">${surveyed(b) ? '<button class="btn ghost" type="button" data-clear>Hapus survei</button>' : ''}<button class="btn" type="button" data-x>Batal</button><button class="btn primary" type="submit">Simpan survei</button></div>
   </form>`;
   document.body.appendChild(d);
   const f = d.querySelector('form');
@@ -288,17 +318,47 @@ async function surveyDialog(bid) {
   if (clr) clr.onclick = async () => {
     try { await api.del(`/api/buildings/${encodeURIComponent(bid)}/survey?area=${encodeURIComponent(S.area.meta.id)}`); d.close(); toast('Survei dihapus.'); } catch (e) { $('#svErr', d).textContent = e.message; }
   };
+  const hoursBox = d.querySelector('#svHours');
+  f.querySelectorAll('input[name=ac]').forEach((r) => r.addEventListener('change', () => { hoursBox.style.display = f.ac.value === 'jam_kerja' ? '' : 'none'; }));
   f.onsubmit = async (ev) => {
     ev.preventDefault();
+    const days = [...f.querySelectorAll('input[name=day]:checked')].map((x) => x.value).join('');
+    if (f.ac.value === 'jam_kerja' && !f.hours.value.trim()) { $('#svErr', d).textContent = 'Isi jam buka gedung (mis. 07:00-16:00).'; return; }
+    const lv = f.levels.value.trim();
+    if (lv && !f.lvok.checked) { $('#svErr', d).textContent = 'Centang konfirmasi bahwa jumlah lantai dihitung langsung di lokasi, atau kosongkan isiannya.'; return; }
+    const ge = f.gelev.value.trim();
+    if (!!ge !== !!f.gmeth.value) { $('#svErr', d).textContent = 'Elevasi tanah terukur harus diisi bersama metode pengukurannya.'; return; }
     try {
-      const r = await api.put(`/api/buildings/${encodeURIComponent(bid)}`, { area_id: S.area.meta.id, levels: parseInt(f.levels.value, 10), basement: parseInt(f.basement.value || '0', 10),
-        structure: f.st.value, access: f.ac.value, roof: f.roof.checked, slf: f.slf.checked, note: f.note.value.trim() });
+      const r = await api.put(`/api/buildings/${encodeURIComponent(bid)}`, { area_id: S.area.meta.id,
+        levels: lv ? parseInt(lv, 10) : null, levels_confirmed: !!(lv && f.lvok.checked), condition: f.cond.value || null,
+        ground_elev_m: ge ? parseFloat(ge) : null, ground_elev_method: f.gmeth.value || null, basement: parseInt(f.basement.value || '0', 10),
+        structure: f.st.value, access: f.ac.value || null, open_hours: f.ac.value === 'jam_kerja' ? f.hours.value.trim() : null,
+        open_days: f.ac.value === 'jam_kerja' && days && days.length < 7 ? days : null, roof: f.roof.checked, slf: f.slf.checked, note: f.note.value.trim() });
       d.close();
-      const lv = r.levels;
-      toast(lv.awas.suitable ? `Tersimpan. Layak evakuasi vertikal (Awas: lantai ${lv.awas.min_floor}+).` : lv.siaga.suitable ? `Tersimpan. Layak untuk Siaga (lantai ${lv.siaga.min_floor}+), tidak untuk Awas.` : `Tersimpan. Tidak disarankan untuk evakuasi vertikal: ${lv.awas.reason || lv.siaga.reason}`, false, 6000);
+      const sc = r.levels;
+      const tierTxt = r.tier === 'verified' ? 'Terverifikasi' : r.tier === 'unsafe' ? 'Tidak Aman' : `Perlu Verifikasi (${(r.caveats || []).slice(0, 2).join('; ')})`;
+      toast(r.tier !== 'verified' ? `Tersimpan. Status: ${tierTxt}.`
+        : sc.awas.suitable ? `Tersimpan. Terverifikasi, layak evakuasi vertikal (Awas: lantai ${sc.awas.min_floor}+).`
+          : sc.siaga.suitable ? `Tersimpan. Terverifikasi; layak untuk Siaga (lantai ${sc.siaga.min_floor}+), tidak untuk Awas.`
+            : `Tersimpan. Terverifikasi, tetapi tidak cukup tinggi: ${sc.awas.reason || sc.siaga.reason}`, false, 7000);
     } catch (e) { $('#svErr', d).textContent = e.message; }
   };
   d.showModal();
+}
+
+function buildingDetail(b) {
+  const lv = b.levels_src === 'default' ? 'jumlah lantai belum diketahui' : `${b.levels} lantai · ${SRC[b.levels_src] || b.levels_src}${b.levels_est ? ' (perkiraan)' : ''}`;
+  const reasons = (b.tier_reasons || []).slice(0, 4);
+  const el = document.createElement('div');
+  el.className = 'bld-pop';
+  el.innerHTML = `<h3>${esc(b.name || 'Gedung tanpa nama')}</h3><span class="tier-badge t-${esc(b.tier || 'unverified')}">${esc((TIER[b.tier] || TIER.unverified).label)}</span>
+    <div class="small">${esc(lv)} · ${esc(elevTxt(b))}${b.hazard ? ' · zona bahaya' : ''}</div>
+    <div class="small muted">${b.condition ? `Kondisi: ${esc(COND[b.condition] || b.condition)} · ` : ''}${esc(STRUCT[b.structure] || 'struktur belum diperiksa')}${b.access ? ` · ${esc(ACCESS[b.access] || b.access)}` : ''}</div>
+    ${reasons.length ? `<ul class="small" style="margin:.2rem 0;padding-left:1rem">${reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+    ${b.tier !== 'unsafe' || b.osm_unsafe == null ? '<button class="btn primary" type="button" style="min-height:36px">Survei gedung ini</button>' : ''}`;
+  const pop = new maplibregl.Popup({ closeButton: true, maxWidth: '280px' }).setLngLat([b.lon, b.lat]).setDOMContent(el).addTo(S.m.map);
+  const btn = el.querySelector('button');
+  if (btn) btn.addEventListener('click', () => { pop.remove(); surveyDialog(b.id); });
 }
 
 async function onMapClick(ev) {
@@ -308,6 +368,12 @@ async function onMapClick(ev) {
     const bid = S.m.buildingAt(ev.point);
     if (!bid) { toast('Tidak ada gedung di titik itu. Perbesar peta lalu ketuk bentuk gedung.', true); return; }
     setMode(null); surveyDialog(bid); return;
+  }
+  if (!S.mode) {
+    // Ketuk gedung (tanpa mode): detail status + tombol survei. Definisi tier sama dengan warga & perencana.
+    const bid = S.m.buildingAt(ev.point);
+    const b = bid ? S.area.buildings.find((x) => x.id === bid) : null;
+    if (b) { buildingDetail(b); return; }
   }
   if (S.mode === 'point') {
     setMode(null);
@@ -347,6 +413,7 @@ async function onAction(act, el) {
   else if (act === 'survey') surveyDialog(id);
   else if (act === 'cancelmode') setMode(null);
   else if (act === 'area') areaDialog();
+  else if (act === 'capall') { S.capAll = !S.capAll; renderCapacity(); }
   else if (act === 'gps') {
     if (!navigator.geolocation || !window.isSecureContext) { toast('GPS tidak tersedia di alamat ini. Ketuk peta saja.', true); return; }
     navigator.geolocation.getCurrentPosition((p) => { setMode(null); pointDialog({ lat: p.coords.latitude, lon: p.coords.longitude, status: 'kosong', services: [] }); },
@@ -378,7 +445,71 @@ function renderConn(on, last) {
   if (on && off) off.remove();
 }
 
-function renderAll() { if (!$('#alertCard')) return; renderAlert(); renderPoints(); renderClosures(); }
+function renderAll() { if (!$('#alertCard')) return; renderAlert(); renderPoints(); renderClosures(); renderCapacity(); }
+
+// ------------------------------------------------------------------ daya tampung & alokasi
+const CAP_STATUS = {
+  ok: ['ok', 'Teralokasi — tidak ada gedung melebihi kapasitas'],
+  kurang: ['danger', 'TIDAK CUKUP — ada warga tanpa tujuan yang terjangkau'],
+  pending: ['warn', 'Sedang dihitung — rute warga sementara TANPA batas kapasitas'],
+  gagal: ['danger', 'Gagal / tidak lolos validasi — rute warga TANPA batas kapasitas'],
+  tanpa_penduduk: ['warn', 'Tidak dihitung — data penduduk tidak tersedia di peta ini'],
+  tanpa_gedung: ['muted', 'Tidak ada gedung berkapasitas untuk jenis tujuan ini'],
+};
+const num = (x) => (x == null ? '–' : Number(x).toLocaleString('id-ID'));
+function renderCapacity() {
+  const el = $('#capBody'); if (!el) return;
+  const tb = S.sync && S.sync.tables;
+  const c = tb && tb.capacity && tb.capacity[S.capMode];
+  if (!c) { setHTML(el, '<p class="small muted" style="margin:0">Belum ada data alokasi untuk wilayah ini.</p>'); return; }
+  const [cls, txt] = CAP_STATUS[c.status] || ['muted', c.status];
+  const color = cls === 'danger' ? 'var(--danger)' : cls === 'warn' ? 'var(--warn)' : cls === 'ok' ? 'var(--ok, #166534)' : 'inherit';
+  const t = c.totals || null;
+  const pop = c.population || {};
+  const secs = c.timing ? (c.timing.all_s ?? c.timing.total_s) : null;
+  const head = `<p style="margin:0;color:${color}"><strong>${esc(txt)}</strong></p>
+    <p class="small muted" style="margin:0">${c.computed_at ? `Dihitung ${esc(timeAgo(c.computed_at, now()))} · ${esc(String(c.method || '').startsWith('lp') ? (c.optimal ? 'optimal (LP HiGHS)' : 'LP, belum terbukti optimal') : 'heuristik greedy (cadangan, bukan optimal)')} · ${secs != null ? (secs < 0.1 ? '&lt; 0,1 s' : `${esc(secs.toFixed(1).replace('.', ','))} s`) : ''}` : 'Belum ada hasil untuk skenario ini.'}${c.deadline_s != null ? ` · batas waktu jalan ${Math.round(c.deadline_s / 60)} menit` : ''} · tinggi gelombang ${esc(String(c.wave_m).replace('.', ','))} m</p>`;
+  let body = '';
+  if (t) {
+    const rows = [
+      [pop.method === 'grid' ? `Penduduk grid${pop.synthetic ? ' SINTETIS' : ''} (permintaan)` : 'Penduduk perkiraan model (permintaan)', num(t.demand)],
+      ['Ke gedung berkapasitas', num(t.to_shelter)],
+      ['Ke zona aman / tanah tinggi (kapasitas tidak diketahui)', num(t.to_unlimited)],
+      ['<strong>Tanpa tujuan terjangkau</strong>', `<strong style="color:${t.unresolved ? 'var(--danger)' : 'inherit'}">${num(t.unresolved)}</strong>`],
+      ['Diperkirakan tiba setelah batas waktu', `<span style="color:${t.late ? 'var(--warn)' : 'inherit'}">${num(t.late)}</span>`],
+      ['Kapasitas gedung terpakai', `${num(t.capacity_used)} / ${num(t.capacity_total)}`],
+      ['Waktu tempuh rata-rata / terlama', `${Math.round((t.time_mean || 0) / 60)} / ${Math.round((t.time_max || 0) / 60)} menit`],
+    ];
+    body += `<table class="small" style="width:100%;border-collapse:collapse">${rows.map(([k, v]) => `<tr><td style="padding:.15rem 0">${k}</td><td style="text-align:right;white-space:nowrap;padding-left:.5rem">${v}</td></tr>`).join('')}</table>`;
+  } else body += `<p class="small" style="margin:0">${pop.method === 'grid' ? 'Penduduk grid' : 'Penduduk perkiraan model'}: ${num(pop.people)} orang · ${num((c.dests || []).length)} gedung, kapasitas ${num((c.dests || []).reduce((a, d) => a + (d.capacity || 0), 0))} orang.</p>`;
+  const msgs = [...(c.messages || []), ...(c.errors || [])];
+  if (msgs.length) body += `<ul class="small" style="margin:.2rem 0;padding-left:1.1rem">${msgs.slice(0, 6).map((m) => `<li>${esc(m)}</li>`).join('')}</ul>`;
+  const ds = (c.dests || []).slice().sort((a, b) => (b.full === true) - (a.full === true) || (b.allocated || 0) - (a.allocated || 0));
+  const shown = S.capAll ? ds : ds.slice(0, 12);
+  if (ds.length) {
+    body += `<div class="list" style="max-height:40vh;overflow:auto">${shown.map((d) => {
+      const pct = d.capacity ? Math.min(100, Math.round(100 * (d.allocated || 0) / d.capacity)) : 100;
+      const state = d.capacity <= 0 ? '<span class="chip penuh">tidak tersedia</span>' : d.full ? '<span class="chip penuh">penuh</span>' : '';
+      return `<div class="item"><div class="grow"><strong>${esc(d.name || d.id)}</strong> ${state}
+        <div class="small muted">${d.allocated != null ? `dialokasikan ${num(d.allocated)} · sisa ${num(d.remaining)} · ` : ''}kapasitas tersedia ${num(d.capacity)}${d.occupied ? ` (desain ${num(d.capacity_design)} − ${num(d.occupied)} sudah di dalam)` : ''}</div>
+        ${d.allocated != null ? `<div style="height:6px;background:var(--line,#ddd);border-radius:3px;margin-top:.2rem"><div style="height:6px;width:${pct}%;background:${d.full ? 'var(--danger)' : 'var(--info)'};border-radius:3px"></div></div>` : ''}</div>
+        <form class="row" data-occ="${esc(d.id)}" style="gap:.3rem"><input type="number" name="occ" min="0" max="100000" value="${d.occupied || ''}" placeholder="di dalam" title="Orang yang sudah berada di gedung" aria-label="Orang sudah di dalam ${esc(d.name || d.id)}" style="width:7.5rem">
+        <button class="btn" type="submit">Simpan</button></form></div>`;
+    }).join('')}</div>`;
+    if (ds.length > 12) body += `<button class="btn ghost" data-act="capall" type="button">${S.capAll ? 'Tampilkan 12 teratas' : `Tampilkan semua (${ds.length})`}</button>`;
+  }
+  setHTML(el, head + body);
+}
+
+async function saveOccupancy(form) {
+  const v = form.occ.value === '' ? 0 : parseInt(form.occ.value, 10);
+  if (!(v >= 0)) { toast('Isi angka 0 atau lebih.', true); return; }
+  try {
+    await api.put(`/api/shelters/${encodeURIComponent(form.dataset.occ)}/occupancy`, { occupied: v, area_id: S.area.meta.id });
+    toast('Okupansi disimpan. Alokasi dihitung ulang.');
+    S.sync.refresh().catch(() => {});
+  } catch (e) { toast(e.message, true); }
+}
 
 // Kode QR untuk membuka aplikasi warga di HP (juri/warga cukup memindai).
 function renderQR() {
@@ -401,11 +532,23 @@ async function startDash(user) {
     onArea: (area, meta) => {
       S.area = area; S.meta = meta; S.html = {};
       $('#areaName').innerHTML = `Wilayah: <strong>${esc(area.meta.name)}</strong> <button class="btn ghost" style="min-height:32px;padding:.1rem .6rem" data-act="area" type="button">Ganti</button>`;
-      if (!S.m) { S.m = createMap($('#map'), area); S.m.map.on('click', onMapClick); }
-      else S.m.setArea(area);
+      // Preset petugas: prioritas survei & status verifikasi (warna isi = tier), akses jalan, kapasitas shelter.
+      if (!S.m) {
+        S.m = createMap($('#map'), area, { buildingsColor: 'tier',
+          groups: ['bangunan', 'kelayakan', 'bangunan3d', 'bahaya', 'jalan', 'shelter', 'penduduk', 'penanda', 'rute'],
+          defaults: ['bangunan', 'kelayakan', 'bahaya', 'jalan', 'shelter', 'penanda'] });
+        S.m.map.on('click', onMapClick);
+      } else S.m.setArea(area);
       S.m.setOfficial(area.official_points);
       S.m.setFacilities(area.facilities || []);
+      api.get(`/api/areas/${encodeURIComponent(area.meta.id)}/population`).then((r) => S.m.setPopulation(r.cells)).catch(() => S.m.setPopulation(null));
       renderQR();
+      renderSurveyList();
+    },
+    // Survei satu gedung (oleh petugas mana pun): tambal gedung itu saja, tanpa memuat ulang area & peta.
+    onAreaPatch: (area, changed, removed) => {
+      S.area = area; S.html.surveyList = null;
+      S.m.patchBuildings(area, changed, removed);
       renderSurveyList();
     },
     onState: (st) => {
@@ -417,6 +560,7 @@ async function startDash(user) {
       renderAll();
     },
     onAlert: () => renderAll(),
+    onTables: (tb) => { renderCapacity(); S.m.setCapacity(capacityPoints(tb, S.capMode || 'aman')); },
     onConn: renderConn,
   });
   try { await S.sync.start(); renderConn(S.sync.online, S.sync.lastSync); } catch (e) { toast(e.message, true); }
@@ -428,14 +572,20 @@ async function main() {
   registerSW();
   document.addEventListener('click', (ev) => { const b = ev.target.closest('[data-act]'); if (b) { ev.preventDefault(); onAction(b.dataset.act, b); } });
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && S.mode) setMode(null); });
+  document.addEventListener('submit', (ev) => { const f = ev.target.closest('form[data-occ]'); if (f) { ev.preventDefault(); saveOccupancy(f); } });
+  document.addEventListener('change', (ev) => { if (ev.target.id === 'capMode') { S.capMode = ev.target.value; S.capAll = false; renderCapacity(); if (S.m && S.sync) S.m.setCapacity(capacityPoints(S.sync.tables, S.capMode)); } });
   if (api.token) {
     try { const r = await api.get('/api/auth/me'); return startDash(r.user); } catch { api.logout(); }
   }
+  const meta = await api.get('/api/meta').catch(() => null);  // akun demo hanya ada di server lokal
   renderLogin($('#root'), {
     title: 'Masuk — Petugas Lapangan', roles: ['petugas', 'perencana'],
-    hint: 'Akun demo: <strong>petugas</strong> / <strong>petugas123</strong>. Ganti kata sandi sebelum dipakai sungguhan.',
+    hint: meta && meta.demo_accounts
+      ? 'Akun demo: <strong>petugas</strong> / <strong>petugas123</strong>. Ganti kata sandi sebelum dipakai sungguhan.'
+      : 'Masuk dengan akun yang diberikan pengelola server.',
     onDone: startDash,
   });
 }
 window.__petugas = S;
 main();
+window.__petugas = S;

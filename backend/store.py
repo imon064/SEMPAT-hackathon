@@ -1,4 +1,8 @@
-"""Penyimpanan SQLite untuk peringatan, titik bantuan, jalan putus, shelter terdaftar, dan log audit."""
+"""Penyimpanan SQLite untuk peringatan, titik bantuan, jalan putus, shelter terdaftar, survei gedung, lapisan data
+unggahan (tinggi gedung, peta bahaya, Earth Engine) dan log audit.
+
+Lapisan unggahan disimpan di sini (bukan hanya di area.json) agar tidak hilang saat area dibangun ulang dari OSM.
+"""
 from __future__ import annotations
 
 import datetime as _dt
@@ -40,10 +44,19 @@ CREATE TABLE IF NOT EXISTS building_info (
   roof INTEGER, slf INTEGER, note TEXT, updated_by TEXT, updated_at TEXT,
   PRIMARY KEY (area_id, building_id)
 );
+CREATE TABLE IF NOT EXISTS area_layers (
+  id TEXT PRIMARY KEY, area_id TEXT, kind TEXT, source TEXT, name TEXT, data TEXT,
+  created_by TEXT, created_at TEXT
+);
 """
 # Kolom yang ditambahkan setelah versi awal (migrasi ringan)
 MIGRATIONS = [("alerts", "radius_km", "REAL"), ("alerts", "created_by", "TEXT"),
-              ("alerts", "level", "TEXT"), ("alerts", "wave_m", "REAL")]
+              ("alerts", "level", "TEXT"), ("alerts", "wave_m", "REAL"),
+              # jam buka gedung hasil survei (akses "jam_kerja"); baris lama = NULL = jam buka belum dicatat
+              ("building_info", "open_hours", "TEXT"), ("building_info", "open_days", "TEXT"),
+              # audit D-7/D-2: konfirmasi jumlah lantai dihitung langsung, kondisi bangunan, elevasi tanah terukur
+              ("building_info", "levels_confirmed", "INTEGER"), ("building_info", "condition", "TEXT"),
+              ("building_info", "ground_elev_m", "REAL"), ("building_info", "ground_elev_method", "TEXT")]
 
 
 def now_iso() -> str:
@@ -214,22 +227,39 @@ class Store:
 
     def set_building_info(self, area_id: str, bid: str, f: dict, by: str) -> dict:
         self._x("""INSERT INTO building_info(area_id,building_id,levels,basement,structure,access,roof,slf,note,
-                   updated_by,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   updated_by,updated_at,open_hours,open_days,levels_confirmed,condition,ground_elev_m,
+                   ground_elev_method) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(area_id,building_id) DO UPDATE SET levels=excluded.levels, basement=excluded.basement,
                    structure=excluded.structure, access=excluded.access, roof=excluded.roof, slf=excluded.slf,
-                   note=excluded.note, updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+                   note=excluded.note, updated_by=excluded.updated_by, updated_at=excluded.updated_at,
+                   open_hours=excluded.open_hours, open_days=excluded.open_days,
+                   levels_confirmed=excluded.levels_confirmed, condition=excluded.condition,
+                   ground_elev_m=excluded.ground_elev_m, ground_elev_method=excluded.ground_elev_method""",
                 (area_id, bid, f.get("levels"), f.get("basement", 0), f.get("structure"), f.get("access"),
-                 int(bool(f.get("roof"))), int(bool(f.get("slf"))), f.get("note", ""), by, now_iso()))
+                 int(bool(f.get("roof"))), int(bool(f.get("slf"))), f.get("note", ""), by, now_iso(),
+                 f.get("open_hours"), f.get("open_days"), int(bool(f.get("levels_confirmed"))),
+                 f.get("condition"), f.get("ground_elev_m"), f.get("ground_elev_method")))
         return self.get_building_info(area_id, bid)
 
     def delete_building_info(self, area_id: str, bid: str) -> None:
         self._x("DELETE FROM building_info WHERE area_id=? AND building_id=?", (area_id, bid))
+
+    # ---------- lapisan data unggahan (diterapkan ulang setelah area dibangun ulang) ----------
+    def add_layer(self, area_id: str, kind: str, source: str, name: str, data: dict, by: str) -> str:
+        lid = uuid.uuid4().hex[:12]
+        self._x("INSERT INTO area_layers(id,area_id,kind,source,name,data,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (lid, area_id, kind, source, name, json.dumps(data, separators=(",", ":")), by, now_iso()))
+        return lid
+
+    def list_layers(self, area_id: str) -> List[dict]:
+        return self._q("SELECT * FROM area_layers WHERE area_id=? ORDER BY created_at, rowid", (area_id,))
 
 
 def _binfo_out(r: dict) -> dict:
     r = dict(r)
     r["roof"] = bool(r.get("roof"))
     r["slf"] = bool(r.get("slf"))
+    r["levels_confirmed"] = bool(r.get("levels_confirmed"))
     return r
 
 

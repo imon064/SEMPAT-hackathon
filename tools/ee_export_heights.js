@@ -11,6 +11,8 @@
 // resolusi efektif ± 4 m; poligon Open Buildings V3 (kepercayaan ≥ 0,75). Lisensi CC BY 4.0 —
 // cantumkan "Google Open Buildings". Nilai tinggi adalah PERKIRAAN satelit: SEMPAT menandainya
 // "belum diverifikasi" sampai petugas mensurvei gedungnya.
+// Setiap fitur membawa sempat_source = 'google_open_buildings' (agar SEMPAT mencatat sumbernya sebagai Google,
+// bukan unggahan perencana) dan full_plus_code (ID gedung tetap walau urutan fitur berubah).
 
 var BBOX = [100.33, -0.97, 100.39, -0.92]; // [barat, selatan, timur, utara] — GANTI
 var YEAR = 2023;                            // 2016–2023
@@ -23,14 +25,22 @@ var img = ee.ImageCollection('GOOGLE/Research/open-buildings-temporal/v1')
   .mosaic();
 var height = img.select('building_height').updateMask(img.select('building_presence').gt(0.5));
 
+// Hanya poligon yang bersinggungan dengan piksel setinggi >= MIN_HEIGHT_M: rata-rata tinggi tidak dihitung
+// untuk puluhan ribu rumah rendah yang pasti dibuang.
+var tallBlobs = height.gte(MIN_HEIGHT_M).selfMask().reduceToVectors({
+  geometry: region, scale: 8, geometryType: 'polygon', eightConnected: true, maxPixels: 1e9, bestEffort: true });
+
 var polys = ee.FeatureCollection('GOOGLE/Research/open-buildings/v3/polygons')
-  .filterBounds(region)
+  .filterBounds(tallBlobs)
   .filter(ee.Filter.gte('confidence', 0.75))
   .filter(ee.Filter.gte('area_in_meters', 40));
 
-var withHeight = height.reduceRegions({ collection: polys, reducer: ee.Reducer.mean(), scale: 4 })
+var withHeight = height.reduceRegions({ collection: polys, reducer: ee.Reducer.mean(), scale: 4, tileScale: 4 })
   .filter(ee.Filter.gte('mean', MIN_HEIGHT_M))
-  .map(function (f) { return f.select(['mean'], ['height']); });
+  .map(function (f) {
+    return f.select(['mean', 'full_plus_code'], ['height', 'full_plus_code'])
+      .set('sempat_source', 'google_open_buildings').set('year', YEAR);
+  });
 
 Map.centerObject(region, 15);
 Map.addLayer(height, { min: 0, max: 30, palette: ['ffffff', 'fdae61', 'd7191c'] }, 'Tinggi gedung 2.5D ' + YEAR);

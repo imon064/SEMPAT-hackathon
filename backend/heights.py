@@ -1,43 +1,70 @@
 """Tinggi gedung dari sumber selain tag OSM.
 
 Urutan kepercayaan (yang lebih tinggi tidak ditimpa yang lebih rendah):
-  survei petugas > OSM building:levels > OSM height > unggahan perencana > Google 2.5D > tidak ada data.
+  survei petugas > OSM building:levels / building:part > OSM height > unggahan perencana > Google 2.5D > tidak ada data.
+
+Survei petugas TIDAK disimpan di area.json: ia lapisan di atas data otomatis (lihat app.AreaCtx.apply_survey).
+Fungsi di sini selalu bekerja pada lapisan otomatis, sehingga data unggahan/Google tetap tersimpan walau gedung sedang
+tersurvei, dan muncul kembali bila survei dibatalkan.
 
 Sumber yang didukung:
-1. GeoJSON unggahan perencana: poligon/titik dengan properti `height` (meter) atau `levels`.
-   Bisa berasal dari ekspor Google Earth Engine (tools/ee_export_heights.js), data BPBD, Overture, dsb.
+1. GeoJSON unggahan perencana: poligon/titik dengan properti `height` (meter/feet) atau `levels`.
+   Fitur dengan properti `sempat_source = "google_open_buildings"` (hasil tools/ee_export_heights.js) dicatat
+   sebagai sumber "google", bukan "upload".
 2. Google Open Buildings 2.5D Temporal lewat Earth Engine (opsional, butuh akun & proyek Google Cloud):
    raster `building_height` (m, relatif terhadap tanah) beresolusi efektif ± 4 m untuk 2016-2023.
-   Lisensi data: CC BY 4.0 — cantumkan "Google Open Buildings".
+   Lisensi data: CC BY 4.0 — cantumkan "Google Open Buildings". BELUM divalidasi dengan Earth Engine asli.
+
+Jumlah lantai dari tinggi = floor(tinggi / params["height_per_level_m"]) (keputusan proyek: 4 m per lantai) dan
+ditandai levels_est=True. Tinggi tempat ibadah TIDAK dipakai untuk menebak lantai (kubah/menara) -> perlu survei.
+Bila sumber berbeda memberi jumlah lantai yang selisihnya >= CONFLICT_MIN_LEVELS, gedung diberi `levels_conflict`
+(sumber -> lantai) dan masuk prioritas survei; peringkat sumber tetap menentukan nilai yang dipakai.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from .area_builder import levels_from_height
+from . import tsunami
+from .area_builder import DEFAULT_PARAMS, building_elevation, levels_from_height, parse_height_m, parse_levels
 from .geo import LocalProjection, point_in_polygon, polygon_area_m2, polygon_centroid
 
 TEMPORAL_ASSET = "GOOGLE/Research/open-buildings-temporal/v1"
 V3_ASSET = "GOOGLE/Research/open-buildings/v3/polygons"
-PROTECTED_SOURCES = ("survey", "osm", "osm_height")  # tidak ditimpa data perkiraan
-SOURCE_RANK = {"default": 0, "google": 1, "upload": 2, "osm_height": 3, "osm": 4, "survey": 5}
+PROTECTED_SOURCES = ("survey", "osm", "osm_height", "osm_part")  # tidak ditimpa data perkiraan
+SOURCE_RANK = {"default": 0, "google": 1, "upload": 2, "osm_height": 3, "osm": 4, "osm_part": 4, "survey": 5}
+GOOGLE_MARKERS = ("google_open_buildings", "google")
+ID_PREFIX = {"google": "gob-", "upload": "upl-"}  # ID gedung tambahan; "g{n}" lama tetap dikenali
+CONFLICT_MIN_LEVELS = 2  # selisih jumlah lantai antar-sumber yang dicatat sebagai konflik (HEURISTIK)
 Log = Callable[[str], None]
 
 
 # ---------------------------------------------------------------------------
 # GeoJSON
 # ---------------------------------------------------------------------------
-def _num(v) -> Optional[float]:
+def _ring(coords) -> Optional[List[Tuple[float, float]]]:
+    """Cincin (lon, lat) yang valid: >= 4 titik, angka terhingga, di dalam rentang koordinat."""
     try:
-        x = float(str(v).replace(",", ".").replace("m", "").strip())
-        return x if math.isfinite(x) else None
-    except (TypeError, ValueError):
+        r = [(float(c[0]), float(c[1])) for c in coords]
+    except (TypeError, ValueError, IndexError):
         return None
+    if len(r) < 4 or any(not (math.isfinite(x) and math.isfinite(y) and -180 <= x <= 180 and -90 <= y <= 90)
+                         for x, y in r):
+        return None
+    return r
+
+
+def _ring_size(r: List[Tuple[float, float]]) -> float:
+    k = math.cos(math.radians(sum(y for _, y in r) / len(r)))
+    return polygon_area_m2([(x * k, y) for x, y in r])
 
 
 def parse_height_features(doc: dict) -> List[dict]:
-    """Ambil fitur tinggi gedung dari GeoJSON. Hasil: {ring|point, height, levels, name, bid}."""
+    """Ambil fitur tinggi gedung dari GeoJSON. Hasil: {ring|point, height, levels, name, bid, source, uid}.
+
+    Geometri tidak valid dilewati (fitur tetap dipakai bila punya `bid`). MultiPolygon: poligon terbesar.
+    """
     feats = doc.get("features") if doc.get("type") == "FeatureCollection" else [doc]
     out = []
     for f in feats or []:
@@ -47,26 +74,37 @@ def parse_height_features(doc: dict) -> List[dict]:
         h = None
         for k in ("height", "building_height", "mean", "tinggi", "height_m"):
             if props.get(k) is not None:
-                h = _num(props[k])
+                h = parse_height_m(props[k])
                 break
         lv = None
         for k in ("levels", "building:levels", "lantai", "jumlah_lantai"):
             if props.get(k) is not None:
-                lv = _num(props[k])
+                lv = parse_levels(props[k])
                 break
-        if (h is None or h <= 0) and (lv is None or lv < 1):
+        if h is None and lv is None:
             continue
+        src = "google" if str(props.get("sempat_source", "")).strip().lower() in GOOGLE_MARKERS else None
+        item = {"height": h, "levels": lv, "name": str(props.get("name") or props.get("nama") or "")[:80],
+                "bid": props.get("bid"), "source": src,
+                "uid": props.get("full_plus_code") or props.get("plus_code") or None}
         g = f.get("geometry") or {}
-        item = {"height": h if h and h > 0 else None, "levels": int(round(lv)) if lv and lv >= 1 else None,
-                "name": str(props.get("name") or props.get("nama") or "")[:80], "bid": props.get("bid")}
-        if g.get("type") == "Polygon" and g.get("coordinates"):
-            item["ring"] = [(float(x), float(y)) for x, y, *_ in g["coordinates"][0]]
-        elif g.get("type") == "MultiPolygon" and g.get("coordinates"):
-            item["ring"] = [(float(x), float(y)) for x, y, *_ in g["coordinates"][0][0]]
-        elif g.get("type") == "Point" and g.get("coordinates"):
-            x, y = g["coordinates"][:2]
-            item["point"] = (float(x), float(y))
-        elif not item["bid"]:
+        typ, coords = g.get("type"), g.get("coordinates")
+        ring = None
+        if typ == "Polygon" and coords:
+            ring = _ring(coords[0])
+        elif typ == "MultiPolygon" and coords:
+            rings = [r for r in (_ring(poly[0]) for poly in coords if poly) if r]
+            ring = max(rings, key=_ring_size) if rings else None
+        elif typ == "Point" and coords:
+            try:
+                x, y = float(coords[0]), float(coords[1])
+                if math.isfinite(x) and math.isfinite(y):
+                    item["point"] = (x, y)
+            except (TypeError, ValueError, IndexError):
+                pass
+        if ring:
+            item["ring"] = ring
+        if not (ring or item.get("point") or item["bid"]):
             continue
         out.append(item)
     return out
@@ -112,16 +150,49 @@ class _BGrid:
                 yield from self.cells.get((i, j), ())
 
 
+def stable_building_id(source: str, ring_lonlat: List[Tuple[float, float]], uid: Optional[str] = None) -> str:
+    """ID deterministik untuk gedung tambahan: tidak bergantung pada urutan fitur maupun pusat proyeksi area.
+
+    Kunci = kode Plus Open Buildings bila ada, selain itu titik berat footprint (lon/lat, 6 desimal ≈ 0,1 m).
+    Dua footprint dengan titik berat sama persis dianggap gedung yang sama (bukan duplikat baru).
+    """
+    if uid:
+        key = f"pc:{str(uid).strip().upper()}"
+    else:
+        r = ring_lonlat[:-1] if len(ring_lonlat) > 1 and ring_lonlat[0] == ring_lonlat[-1] else ring_lonlat
+        cx, cy = polygon_centroid(r)
+        key = f"{cy:.6f},{cx:.6f}"
+    return ID_PREFIX.get(source, "add-") + hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
+def _set_levels(target: dict, levels: int, h: Optional[float], src: str, est: bool, name: str, params: dict) -> None:
+    target["levels"] = int(levels)
+    target["height_m"] = round(h, 1) if h else None
+    target["levels_src"] = src
+    target["levels_est"] = bool(est)
+    target.pop("levels_note", None)
+    if name and not target.get("name"):
+        target["name"] = name
+    _refresh_candidate(target, params)
+
+
 def apply_heights(area: dict, engine, features: List[dict], *, source: str = "upload", add_missing: bool = True,
                   min_add_height_m: float = 6.0, log: Log = print) -> dict:
-    """Gabungkan tinggi gedung ke area. Mengembalikan statistik. Area diubah langsung (lalu simpan ulang)."""
+    """Gabungkan tinggi gedung ke area (lapisan otomatis). Mengembalikan statistik. Area diubah langsung.
+
+    Setiap fitur boleh membawa `source` sendiri (mis. "google" dari skrip Earth Engine) yang menimpa `source`.
+    """
+    params = area["params"]
+    per = params.get("height_per_level_m")
     proj = LocalProjection(area["meta"]["center"][1], area["meta"]["center"][0])
     blds = area["buildings"]
     grid = _BGrid(blds, proj)
     by_id = {b["id"]: b for b in blds}
-    stats = {"features": len(features), "updated": 0, "kept": 0, "added": 0, "unmatched": 0}
+    stats = {"features": len(features), "updated": 0, "kept": 0, "added": 0, "unmatched": 0, "same_footprint": 0,
+             "conflicts": 0, "religious_skipped": 0}
     added: List[dict] = []
     for f in features:
+        src = f.get("source") or source
         target = by_id.get(f.get("bid")) if f.get("bid") else None
         ring_xy = [proj.to_xy(la, lo) for lo, la in f["ring"]] if f.get("ring") else None
         if ring_xy and len(ring_xy) >= 3:
@@ -143,27 +214,43 @@ def apply_heights(area: dict, engine, features: List[dict], *, source: str = "up
                         best = (d, i)
             target = blds[best[1]] if best else None
         h, lv = f.get("height"), f.get("levels")
-        levels = lv if lv else (levels_from_height(h) if h else None)
+        levels = lv if lv else (levels_from_height(h, per) if h else None)
         if levels is None:
             continue
+        est = not lv
+        nid = None
+        per_m = float(per or DEFAULT_PARAMS["height_per_level_m"])
+        if target is None and add_missing and f.get("ring") and (h or levels * per_m) >= min_add_height_m:
+            nid = stable_building_id(src, f["ring"], f.get("uid"))
+            if nid in by_id:  # footprint sama dengan gedung tambahan yang sudah ada
+                target = by_id[nid]
+                stats["same_footprint"] += 1
         if target is not None:
-            if SOURCE_RANK.get(target.get("levels_src", "default"), 0) > SOURCE_RANK.get(source, 1):
+            cur_src = target.get("levels_src", "default")
+            religious_est = est and target.get("kind") == "ibadah"  # tinggi tempat ibadah = kubah/menara
+            if (not religious_est and cur_src not in ("default", src)
+                    and abs(int(target.get("levels") or 1) - int(levels)) >= CONFLICT_MIN_LEVELS):
+                conflict = target.setdefault("levels_conflict", {})
+                conflict[cur_src] = int(target.get("levels") or 1)
+                conflict[src] = int(levels)
+                stats["conflicts"] += 1
+            if SOURCE_RANK.get(cur_src, 0) > SOURCE_RANK.get(src, 1):
                 stats["kept"] += 1
+                _refresh_candidate(target, params)
                 continue
-            target["levels"] = int(levels)
-            target["height_m"] = round(h, 1) if h else None
-            target["levels_src"] = source
-            if f.get("name") and not target.get("name"):
-                target["name"] = f["name"]
-            _refresh_candidate(target, area["params"])
+            if religious_est:  # tidak menebak lantai tempat ibadah dari tinggi -> tetap perlu survei
+                stats["religious_skipped"] += 1
+                continue
+            _set_levels(target, levels, h, src, est, f.get("name") or "", params)
             stats["updated"] += 1
             continue
-        if not (add_missing and ring_xy and (h or levels * 3.0) >= min_add_height_m):
+        if nid is None:
             stats["unmatched"] += 1
             continue
-        nb = _new_building(area, engine, proj, f, ring_xy, levels, h, source, len(blds) + len(added))
+        nb = _new_building(area, engine, proj, f, ring_xy, levels, h, src, nid, est)
         if nb:
             added.append(nb)
+            by_id[nid] = nb
             stats["added"] += 1
         else:
             stats["unmatched"] += 1
@@ -174,16 +261,12 @@ def apply_heights(area: dict, engine, features: List[dict], *, source: str = "up
 
 
 def _refresh_candidate(b: dict, params: dict) -> None:
-    from .tsunami import WEAK_STRUCTURES
-    b["candidate"] = b["levels"] >= params.get("shelter_min_levels", 2) and b["kind"] != "rumah" \
-        and b.get("structure") not in WEAK_STRUCTURES
-    b["capacity"] = int(b["area_m2"] * (b["levels"] - 1) * params.get("shelter_usable_factor", 0.5)
-                        / params.get("space_per_person_m2", 0.93)) if b["candidate"] else 0
-    b["climb_s"] = round(max(0, b["levels"] - 1) * 3.0 / 0.21, 1) if b["candidate"] else 0.0
+    """Nama lama; sekarang hanya meneruskan ke tsunami.refresh_flags (satu sumber tier)."""
+    tsunami.refresh_flags(b, params)
 
 
 def _new_building(area: dict, engine, proj: LocalProjection, f: dict, ring_xy, levels: int, h: Optional[float],
-                  source: str, n: int) -> Optional[dict]:
+                  source: str, bid: str, est: bool) -> Optional[dict]:
     ring = ring_xy[:-1] if ring_xy[0] == ring_xy[-1] else ring_xy
     if len(ring) < 3:
         return None
@@ -198,13 +281,16 @@ def _new_building(area: dict, engine, proj: LocalProjection, f: dict, ring_xy, l
     e, t = s["edge"], s["t"]
     u, v = engine.eu[e], engine.ev[e]
     near = u if t < 0.5 else v
-    b = {"id": f"g{n}", "name": f.get("name", ""), "kind": "lainnya", "levels": int(levels), "levels_src": source,
-         "height_m": round(h, 1) if h else None, "basement": 0, "structure": "tidak_tahu",
-         "area_m2": round(area_m2, 1), "lat": round(lat, 7), "lon": round(lon, 7),
+    road = engine.elev[u] + t * (engine.elev[v] - engine.elev[u])
+    # Tanpa DEM di titik gedung: interpolasi jalan HANYA bila jalan dekat; selain itu elevasi tidak tersedia (0 m).
+    ev_b = building_elevation(None, road, s["perp_m"], area["params"])
+    b = {"id": bid, "name": f.get("name", ""), "kind": "tidak_diketahui", "btag": "", "osm_unsafe": "",
+         "levels": int(levels),
+         "levels_src": source, "levels_est": bool(est), "height_m": round(h, 1) if h else None, "basement": 0,
+         "structure": "tidak_tahu", "area_m2": round(area_m2, 1), "lat": round(lat, 7), "lon": round(lon, 7),
          "poly": [[round(lo, 7), round(la, 7)] for la, lo in (proj.to_latlon(x, y) for x, y in ring)],
-         "residents": 0.0, "edge": e, "t": round(t, 4), "perp_m": round(s["perp_m"], 1),
-         "elev": round(engine.elev[u] + t * (engine.elev[v] - engine.elev[u]), 1),
-         "hazard": int(engine.hazard[near]), "added_from": source}
+         "geom": "external", "residents": 0.0, "edge": e, "t": round(t, 4), "perp_m": round(s["perp_m"], 1),
+         **ev_b, "hazard": int(engine.hazard[near]), "added_from": source}
     _refresh_candidate(b, area["params"])
     return b
 
@@ -230,8 +316,10 @@ def ee_fetch_heights(area: dict, *, project: str, year: int = 2023, presence_min
                      chunk: int = 400, log: Log = print) -> List[dict]:
     """Ambil rata-rata tinggi gedung Google Open Buildings 2.5D untuk setiap bangunan area.
 
-    Bangunan yang sudah punya data lantai dari OSM/survei tidak diminta. Bila add_missing, poligon
-    Open Buildings V3 (kepercayaan >= 0,75) yang cukup tinggi ikut diambil untuk gedung yang belum dipetakan.
+    Bangunan yang sudah punya data lantai dari OSM/survei tidak diminta. Bila add_missing, poligon Open Buildings V3
+    (kepercayaan >= 0,75) ikut diambil, tetapi HANYA yang bersinggungan dengan piksel setinggi >= min_add_height_m:
+    rata-rata tinggi tidak dihitung untuk puluhan ribu rumah rendah yang pasti dibuang.
+    BELUM diuji dengan Earth Engine asli (hanya modul tiruan).
     """
     import ee
     ee.Initialize(project=project)
@@ -248,22 +336,27 @@ def ee_fetch_heights(area: dict, *, project: str, year: int = 2023, presence_min
         part = targets[k:k + chunk]
         fc = ee.FeatureCollection([ee.Feature(ee.Geometry.Polygon([b["poly"] + [b["poly"][0]]]), {"bid": b["id"]})
                                    for b in part])
-        res = height.reduceRegions(collection=fc, reducer=ee.Reducer.mean(), scale=4).getInfo()
+        res = height.reduceRegions(collection=fc, reducer=ee.Reducer.mean(), scale=4, tileScale=4).getInfo()
         for f in res.get("features", []):
             p = f.get("properties") or {}
-            h = _num(p.get("mean"))
+            h = parse_height_m(p.get("mean"))
             if h is not None and h > 0:
-                out.append({"bid": p.get("bid"), "height": h, "levels": None, "name": ""})
+                out.append({"bid": p.get("bid"), "height": h, "levels": None, "name": "", "source": "google"})
     if add_missing:
-        v3 = (ee.FeatureCollection(V3_ASSET).filterBounds(region)
+        tall = height.gte(min_add_height_m).selfMask()
+        blobs = tall.reduceToVectors(geometry=region, scale=8, geometryType="polygon", eightConnected=True,
+                                     maxPixels=int(1e9), bestEffort=True)
+        v3 = (ee.FeatureCollection(V3_ASSET).filterBounds(blobs)
               .filter(ee.Filter.gte("confidence", 0.75)).filter(ee.Filter.gte("area_in_meters", 40)))
-        res = (height.reduceRegions(collection=v3, reducer=ee.Reducer.mean(), scale=4)
+        res = (height.reduceRegions(collection=v3, reducer=ee.Reducer.mean(), scale=4, tileScale=4)
                .filter(ee.Filter.gte("mean", min_add_height_m)).limit(max_new).getInfo())
         for f in res.get("features", []):
             g = f.get("geometry") or {}
-            h = _num((f.get("properties") or {}).get("mean"))
-            if g.get("type") == "Polygon" and h:
-                out.append({"ring": [(float(x), float(y)) for x, y, *_ in g["coordinates"][0]], "height": h,
-                            "levels": None, "name": ""})
+            props = f.get("properties") or {}
+            h = parse_height_m(props.get("mean"))
+            ring = _ring(g["coordinates"][0]) if g.get("type") == "Polygon" and g.get("coordinates") else None
+            if ring and h:
+                out.append({"ring": ring, "height": h, "levels": None, "name": "", "source": "google",
+                            "uid": props.get("full_plus_code")})
     log(f"  Earth Engine: {len(out)} nilai tinggi diterima.")
     return out

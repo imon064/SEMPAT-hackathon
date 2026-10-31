@@ -40,4 +40,7 @@ class Broker:
         if running is self.loop:
             self._put_all(msg)
         else:
-            self.loop.call_soon_threadsafe(self._put_all, msg)
+            try:
+                self.loop.call_soon_threadsafe(self._put_all, msg)
+            except RuntimeError:  # loop sudah ditutup (server berhenti): tidak ada klien untuk dikirimi
+                pass

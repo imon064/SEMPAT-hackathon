@@ -32,6 +32,16 @@
     <div class="side">
       <section class="card stack" id="alertCard" aria-live="polite"></section>
 
+      <section class="card stack" aria-labelledby="capTitle">
+        <div class="row"><h2 id="capTitle" class="grow" style="margin:0">Daya tampung &amp; alokasi</h2>
+          <select id="capMode" aria-label="Jenis tujuan">
+            <option value="aman">Shelter resmi + zona aman</option>
+            <option value="gedung">Semua gedung layak + tanah tinggi</option>
+          </select></div>
+        <p class="small muted" style="margin:0">Penduduk model dialokasikan ke gedung tanpa melebihi kapasitas. Isi <strong>orang sudah di dalam</strong> agar kapasitas tersisa dihitung ulang.</p>
+        <div id="capBody"></div>
+      </section>
+
       <section class="card stack" aria-labelledby="ptTitle">
         <div class="row"><h2 id="ptTitle" class="grow" style="margin:0">Titik bantuan</h2>
           <button class="btn primary" data-act="addpoint" type="button">+ Tambah titik</button></div>
@@ -65,18 +75,7 @@
     </div>
     <div>
       <div id="map" class="map" role="application" aria-label="Peta wilayah. Ketuk untuk menaruh titik saat mode tambah aktif."></div>
-      <div class="legend" style="margin-top:.5rem">
-        <span><i class="swatch box" style="background:#166534;border-radius:50%"></i>Kosong</span>
-        <span><i class="swatch box" style="background:#1d4ed8;border-radius:50%"></i>Agak ramai</span>
-        <span><i class="swatch box" style="background:#b45309;border-radius:50%"></i>Ramai</span>
-        <span><i class="swatch box" style="background:#b91c1c;border-radius:50%"></i>Penuh / tutup</span>
-        <span><i class="swatch" style="background:#b91c1c"></i>Jalan putus</span>
-        <span><i class="swatch" style="background:#dc2626;opacity:.6"></i>Zona bahaya</span>
-        <span><i class="swatch" style="background:#16a34a;opacity:.6"></i>Zona aman</span>
-        <span><i class="swatch box" style="background:#475569;border-radius:50%"></i>Fasilitas umum (OSM)</span>
-        <span><i class="swatch" style="background:#1d4ed8"></i>Gedung bertingkat (kandidat)</span>
-        <span><i class="swatch" style="background:#166534"></i>Gedung sudah disurvei</span>
-      </div>
+      <!-- Legend: dinamis di dalam peta, mengikuti lapisan aktif (common.js createMap) -->
     </div>
   </div>
 </template>

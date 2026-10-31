@@ -155,6 +155,11 @@ def main() -> None:
         import cryptography  # noqa: F401
     except ImportError:
         sys.exit("Paket belum terpasang. Jalankan: pip install -r requirements.txt")
+    try:
+        import scipy.optimize  # noqa: F401
+    except ImportError:  # server tetap jalan; alokasi kapasitas memakai cadangan greedy (dilaporkan, bukan optimal)
+        print("PERINGATAN: scipy belum terpasang -> alokasi kapasitas memakai cadangan greedy (tidak optimal). "
+              "Jalankan: pip install -r requirements.txt")
 
     import backend.config as cfg
     url = f"http://{'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host}:{args.port}"
@@ -167,10 +172,16 @@ def main() -> None:
     if not cfg.PUBLIC_URL and lan:
         cfg.PUBLIC_URL = f"http://{lan}:{args.port}"
 
+    from backend import auth
     print("\nSEMPAT berjalan:")
+    if cfg.is_public():
+        print("  Server PUBLIK: akun demo dimatikan. Kata sandi dari SEMPAT_PETUGAS_PASSWORD /")
+        print("  SEMPAT_PERENCANA_PASSWORD, atau kata sandi acak berikut (bila belum diatur):")
+    auth.ensure_accounts()
+    demo = auth.demo_accounts_allowed()
     print(f"  Aplikasi warga   : {url}/")
-    print(f"  Aplikasi petugas : {url}/petugas   (akun demo: petugas / petugas123)")
-    print(f"  Dasbor perencana : {url}/perencana (akun demo: perencana / perencana123)")
+    print(f"  Aplikasi petugas : {url}/petugas" + ("   (akun demo: petugas / petugas123)" if demo else ""))
+    print(f"  Dasbor perencana : {url}/perencana" + (" (akun demo: perencana / perencana123)" if demo else ""))
     if cfg.PUBLIC_URL.startswith("https://"):
         print("\n  ==========================================================")
         print(f"  ALAMAT UNTUK HP / JURI (https): {cfg.PUBLIC_URL}/")

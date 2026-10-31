@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -40,31 +42,92 @@ def _get(url: str, timeout: float = 30, data: Optional[bytes] = None) -> bytes:
         return r.read()
 
 
+class OverpassQueryError(RuntimeError):
+    """Server Overpass menolak query (HTTP 400): percobaan ulang tidak akan membantu."""
+
+
 # ---------------------------------------------------------------------------
 # Overpass
 # ---------------------------------------------------------------------------
 FACILITY_AMENITY = "hospital|clinic|doctors|police|fire_station|townhall|community_centre"
+# Gedung yang dimuat peta otomatis warga/petugas walau belum punya tag jumlah lantai: fungsi umum/komersial yang
+# sering bertingkat, atau footprint besar. Aturan yang sama dipakai query Overpass dan mode uji (relevant_building).
+PUBLIC_BUILDING_RX = ("school|college|university|kindergarten|hospital|clinic|government|public|civic|townhall|"
+                      "fire_station|mosque|church|temple|chapel|cathedral|religious|hotel|commercial|retail|office|"
+                      "supermarket|apartments|dormitory")
+PUBLIC_AMENITY_RX = ("school|college|university|kindergarten|hospital|clinic|doctors|townhall|police|fire_station|"
+                     "courthouse|place_of_worship|community_centre")
+SMALL_BUILDING_RX = ("house|detached|semidetached_house|terrace|hut|bungalow|cabin|garage|garages|shed|roof|carport|"
+                     "farm_auxiliary|greenhouse|kiosk")
+# Keliling > 80 m ≈ footprint > 400 m² bila persegi: gedung besar tanpa tag lain. HEURISTIK, bukan standar.
+BIG_FOOTPRINT_PERIMETER_M = 80
+TALL_LEVELS_RX = "^([2-9]|[1-9][0-9]+)"
+
+
+def relevant_building(tags: dict, geometry: Optional[Sequence[dict]] = None) -> bool:
+    """Padanan Python dari filter gedung peta otomatis (overpass_query(buildings="tall"))."""
+    bv = str(tags.get("building", ""))
+    if not bv or bv == "no":
+        return False
+    if re.match(TALL_LEVELS_RX, str(tags.get("building:levels", ""))) or tags.get("height"):
+        return True
+    if re.fullmatch(f"({PUBLIC_BUILDING_RX})", bv) or re.fullmatch(f"({PUBLIC_AMENITY_RX})", tags.get("amenity", "")):
+        return True
+    if tags.get("tourism") in ("hotel", "guest_house", "hostel", "motel") or tags.get("office"):
+        return True
+    if geometry and not re.fullmatch(f"({SMALL_BUILDING_RX})", bv):
+        pts = [(g["lat"], g["lon"]) for g in geometry if g]
+        per = sum(_hav(a, b) for a, b in zip(pts[:-1], pts[1:]))
+        return per > BIG_FOOTPRINT_PERIMETER_M
+    return False
+
+
+def _hav(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    p1, p2 = math.radians(a[0]), math.radians(b[0])
+    dl = math.radians(b[1] - a[1])
+    h = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371008.8 * math.asin(min(1.0, math.sqrt(h)))
 
 
 def overpass_query(bbox: Tuple[float, float, float, float], *, coast_pad_deg: float = 0.035,
                    buildings=False, facilities: bool = True, timeout: int = 90) -> str:
     """bbox = (selatan, barat, utara, timur).
 
-    buildings: True = semua bangunan; "tall" = hanya gedung bertingkat yang tercatat jumlah lantai/tingginya
-    (kandidat evakuasi vertikal tsunami, jauh lebih ringan untuk peta otomatis); False = tanpa bangunan.
+    buildings:
+    - True: semua bangunan (way + relation multipolygon + building:part) — analisis perencana.
+    - "tall": gedung relevan untuk peta otomatis warga/petugas (lihat relevant_building) + relation multipolygon +
+      building:part bertingkat beserta garis luarnya. Rumah kecil tidak diunduh agar peta tetap ringan.
+    - "tall_legacy": filter lama (hanya gedung bertag jumlah lantai >= 2 atau height); cadangan bila server menolak.
+    - False: tanpa bangunan.
     """
     s, w, n, e = bbox
     b = f"{s:.6f},{w:.6f},{n:.6f},{e:.6f}"
     cb = f"{s - coast_pad_deg:.6f},{w - coast_pad_deg:.6f},{n + coast_pad_deg:.6f},{e + coast_pad_deg:.6f}"
-    q = [f"[out:json][timeout:{timeout}];", "(",
-         f'  way["highway"]({b});',
-         f'  way["natural"="coastline"]({cb});',
-         f'  way["waterway"~"^(river|canal)$"]({b});']
+    q = [f"[out:json][timeout:{timeout}];"]
     if buildings == "tall":
-        q.append(f'  way["building"]["building:levels"~"^([2-9]|[1-9][0-9]+)"]({b});')
+        q += ["(", f'  way["building:part"]["building:levels"]({b});', f'  way["building:part"]["height"]({b});',
+              ")->.parts;"]
+    q += ["(",
+          f'  way["highway"]({b});',
+          f'  way["natural"="coastline"]({cb});',
+          f'  way["waterway"~"^(river|canal)$"]({b});']
+    if buildings in ("tall", "tall_legacy"):
+        q.append(f'  way["building"]["building:levels"~"{TALL_LEVELS_RX}"]({b});')
         q.append(f'  way["building"]["height"]({b});')
-    elif buildings:
-        q.append(f'  way["building"]({b});')
+    if buildings == "tall":
+        q += [f'  way["building"~"^({PUBLIC_BUILDING_RX})$"]({b});',
+              f'  way["building"]["amenity"~"^({PUBLIC_AMENITY_RX})$"]({b});',
+              f'  way["building"]["tourism"~"^(hotel|guest_house|hostel|motel)$"]({b});',
+              f'  way["building"]["office"]({b});',
+              f'  way["building"]["building"!~"^({SMALL_BUILDING_RX})$"](if: length() > {BIG_FOOTPRINT_PERIMETER_M})'
+              f'({b});',
+              f'  relation["building"]["type"="multipolygon"]({b});',
+              '  .parts;',
+              '  way(around.parts:1)["building"];']
+    elif buildings is True:
+        q += [f'  way["building"]({b});',
+              f'  relation["building"]["type"="multipolygon"]({b});',
+              f'  way["building:part"]({b});']
     q += [")->.net;", ".net out geom;"]
     if facilities:
         q += ["(",
@@ -83,6 +146,12 @@ def fetch_overpass(query: str, log: Log = print, timeout: float = 120) -> dict:
                 log(f"  Overpass: {url.split('/')[2]} (percobaan {attempt + 1})")
                 body = urllib.parse.urlencode({"data": query}).encode()
                 return json.loads(_get(url, timeout=timeout, data=body).decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 400:  # query ditolak (sintaks/fitur tak didukung): jangan ulangi ke server lain
+                    raise OverpassQueryError(f"Query Overpass ditolak: {exc}") from exc
+                last = exc
+                log(f"    gagal: {exc}")
+                time.sleep(2 + 3 * attempt)
             except Exception as exc:  # server sibuk (429/504), jaringan, dsb.
                 last = exc
                 log(f"    gagal: {exc}")
@@ -296,7 +365,8 @@ def default_dem(cache_dir: Optional[Path], log: Log = print) -> FallbackDEM:
 # ---------------------------------------------------------------------------
 # Nama tempat
 # ---------------------------------------------------------------------------
-def reverse_name(lat: float, lon: float, timeout: float = 10) -> Optional[str]:
+def reverse_place(lat: float, lon: float, timeout: float = 10) -> Tuple[Optional[str], Optional[str]]:
+    """(nama tampilan, provinsi) dari Nominatim; (None, None) bila gagal. Provinsi dipakai untuk zona waktu area."""
     try:
         url = ("https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=14&accept-language=id"
                f"&lat={lat:.5f}&lon={lon:.5f}")
@@ -304,6 +374,10 @@ def reverse_name(lat: float, lon: float, timeout: float = 10) -> Optional[str]:
         local = a.get("village") or a.get("suburb") or a.get("neighbourhood") or a.get("hamlet") or a.get("quarter")
         city = a.get("city") or a.get("town") or a.get("municipality") or a.get("county") or a.get("regency")
         parts = [x for x in (local, city) if x]
-        return ", ".join(dict.fromkeys(parts)) or a.get("state")
+        return (", ".join(dict.fromkeys(parts)) or a.get("state")), a.get("state")
     except Exception:
-        return None
+        return None, None
+
+
+def reverse_name(lat: float, lon: float, timeout: float = 10) -> Optional[str]:
+    return reverse_place(lat, lon, timeout)[0]

@@ -29,6 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from backend import tsunami  # noqa: E402
 from backend.area_builder import DEFAULT_PARAMS, build_area, validate_area  # noqa: E402
 from backend.config import AREAS_DIR  # noqa: E402
 
@@ -47,6 +48,8 @@ def overpass_query(s: float, w: float, n: float, e: float, coast_pad: float = 0.
 (
   way["highway"]({b});
   way["building"]({b});
+  relation["building"]["type"="multipolygon"]({b});
+  way["building:part"]({b});
   way["natural"="coastline"]({cb});
   way["waterway"~"^(river|stream|canal)$"]({b});
 );
@@ -165,7 +168,13 @@ def main() -> None:
     ap.add_argument("--vulnerable-share", type=float, default=DEFAULT_PARAMS["vulnerable_share"])
     ap.add_argument("--eta", type=float, default=DEFAULT_PARAMS["default_eta_min"],
                     help="Perkiraan waktu tiba tsunami (menit) dari kajian BMKG/BPBD")
+    ap.add_argument("--timezone", help="Zona waktu area: Asia/Jakarta (WIB), Asia/Makassar (WITA), Asia/Jayapura (WIT). "
+                                       "Dipakai untuk jam buka gedung saat peringatan; tanpa ini zona ditebak dari bujur.")
+    ap.add_argument("--province", help="Nama provinsi (alternatif --timezone), mis. 'Jawa Timur'")
     args = ap.parse_args()
+    tz = args.timezone or tsunami.timezone_for_province(args.province)
+    if (args.timezone or args.province) and not tsunami.tz_offsets(tz):
+        sys.exit("Zona waktu/provinsi tidak dikenal. Contoh: --timezone Asia/Jakarta atau --province 'Jawa Timur'")
 
     out_dir = AREAS_DIR / args.id
     raw_dir = out_dir / "raw"
@@ -204,6 +213,10 @@ def main() -> None:
                                "Zona bahaya: " + ("poligon resmi" if hazard else
                                                   f"aturan elevasi < {args.elev_threshold} m dan jarak pantai < "
                                                   f"{args.coast_dist / 1000:.1f} km (ASUMSI, ganti dengan peta resmi)")])
+    if tz:
+        area["meta"].update(timezone=tz, timezone_src="eksplisit")
+    else:
+        print("  PERINGATAN: zona waktu tidak diisi (--timezone/--province); jam buka gedung memakai perkiraan bujur.")
     warns = validate_area(area)
     for wmsg in warns:
         print("  PERINGATAN:", wmsg)

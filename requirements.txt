@@ -2,3 +2,7 @@ fastapi>=0.110,<1.0
 pydantic>=2.5,<3.0
 uvicorn>=0.27
 cryptography>=41
+# Alokasi kapasitas shelter (backend/allocation.py): program linear dengan solver HiGHS lewat scipy.optimize.linprog.
+# Tanpa keduanya server tetap berjalan, tetapi alokasi memakai cadangan greedy (dilaporkan sebagai tidak optimal).
+numpy>=1.23
+scipy>=1.10

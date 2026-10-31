@@ -8,5 +8,9 @@ services:
     envVars:
       - key: SEMPAT_VAPID_PRIVATE   # isi dari: python -m backend.webpush
         sync: false
+      - key: SEMPAT_PETUGAS_PASSWORD    # wajib diisi (min. 8 karakter); akun demo tidak aktif di server publik
+        sync: false
+      - key: SEMPAT_PERENCANA_PASSWORD  # wajib diisi (min. 8 karakter)
+        sync: false
       - key: SEMPAT_PUSH_CONTACT
         value: mailto:tim-sempat@example.com

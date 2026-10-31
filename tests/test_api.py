@@ -145,6 +145,13 @@ class TestAPI(APITestBase):
         self.assertGreater(sum(r["red_before"].values()), 0)
         self.assertLessEqual(sum(r["red_after"].values()), sum(r["red_before"].values()))
         top = r["recommended"][0]["id"]
+        self.assertIn("Belum disurvei petugas", r["recommended"][0]["caveats"])
+        # Shelter resmi wajib disurvei petugas dulu (kebijakan: gedung belum terverifikasi = pilihan darurat saja)
+        self.assertEqual(self.client.post(f"/api/shelters/{top}", headers=h).status_code, 400)
+        lv = r["recommended"][0]["levels"]
+        sv = self.client.put(f"/api/buildings/{top}", headers=self.login(),
+                             json={"levels": lv, "levels_confirmed": True, "condition": "baik", "structure": "beton", "access": "24jam"})
+        self.assertEqual(sv.status_code, 200, sv.text)
         self.assertEqual(self.client.post(f"/api/shelters/{top}", headers=h).status_code, 200)
         tab = self.client.get("/api/tables").json()
         self.assertEqual(tab["dests"]["aman"][0]["id"], top)
@@ -155,6 +162,7 @@ class TestAPI(APITestBase):
         self.assertIn("PANDUAN EVAKUASI", info["guidance"])
         self.assertIn("SINTETIS", info["guidance"])
         self.client.delete(f"/api/shelters/{top}", headers=h)
+        self.client.delete(f"/api/buildings/{top}/survey", headers=self.login())
 
 
 class TestLiveAreas(APITestBase):
@@ -267,12 +275,11 @@ class TestPush(APITestBase):
         self.assertTrue(req.headers["Authorization"].startswith("vapid t="))
         # peringatan dalam radius mengirim push; di luar radius tidak
         st = app_module.STATE
-        with mock.patch("backend.webpush.urllib.request.urlopen", fake_urlopen), \
-                mock.patch("threading.Thread.start", lambda self: self.run()):
+        with mock.patch("backend.webpush.urllib.request.urlopen", fake_urlopen):
             n0 = len(sent)
-            st.push_broadcast({"type": "alert", "title": "x"}, center=(-9.6, 112.5), radius_km=100)
+            st.push_broadcast({"type": "alert", "title": "x"}, center=(-9.6, 112.5), radius_km=100, wait=True)
             self.assertEqual(len(sent), n0 + 1)
-            st.push_broadcast({"type": "alert", "title": "x"}, center=(5.5, 95.3), radius_km=100)
+            st.push_broadcast({"type": "alert", "title": "x"}, center=(5.5, 95.3), radius_km=100, wait=True)
             self.assertEqual(len(sent), n0 + 1)
 
     def test_bmkg_event_creates_alert(self):

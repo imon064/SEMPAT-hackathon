@@ -51,6 +51,14 @@
         <div class="range"><div class="lbl"><label for="k">Cari gedung tambahan sebagai shelter vertikal</label><output id="kV"></output></div>
           <input type="range" id="k" min="0" max="10" step="1" value="5"></div>
         <label class="check"><input type="checkbox" id="useReg" checked> Hitung shelter yang sudah terdaftar</label>
+        <label class="field small">Jam skenario (akses gedung berjam buka terbatas)
+          <select id="scnTime">
+            <option value="terburuk" selected>Kondisi terburuk — gedung berjam terbatas dianggap tutup</option>
+            <option value="02:00">Malam (02.00 waktu setempat)</option>
+            <option value="10:00">Siang (10.00 waktu setempat, hari ini)</option>
+            <option value="sekarang">Sekarang</option>
+            <option value="peringatan">Jam peringatan aktif</option>
+          </select></label>
         <p class="small muted" id="calcStatus" role="status" style="margin:0"></p>
       </section>
 
@@ -71,6 +79,18 @@
         <div class="list" id="recList"></div>
       </section>
 
+      <section class="card stack" aria-labelledby="verTitle">
+        <h2 id="verTitle" style="margin:0">Daftar verifikasi BPBD</h2>
+        <p class="small muted" style="margin:0">Gedung yang cukup tinggi untuk skenario ini (lantai aman konservatif) tetapi <strong>belum terverifikasi</strong>. Tidak dipakai sebagai tujuan warga sampai petugas menyurvei kondisi, struktur, akses, jumlah lantai, dan elevasi.</p>
+        <div class="list" id="verList"></div>
+      </section>
+
+      <section class="card stack no-print" aria-labelledby="evTitle">
+        <h2 id="evTitle" style="margin:0">Paket bukti Tsunami Ready</h2>
+        <p class="small muted" style="margin:0">Ringkasan bukti pendukung per indikator UNESCO-IOC (zona bahaya, orang berisiko, gedung terverifikasi, daftar verifikasi, asal data, versi model, keterbatasan) untuk dicetak atau disimpan sebagai PDF. Bukan penilaian status Tsunami Ready.</p>
+        <a class="btn" id="evLink" href="/perencana/bukti" target="_blank" rel="noopener">Buka paket bukti</a>
+      </section>
+
       <section class="card stack" aria-labelledby="regTitle">
         <h2 id="regTitle" style="margin:0">Shelter terdaftar</h2>
         <p class="small muted" style="margin:0">Shelter terdaftar langsung menjadi tujuan rute warga.</p>
@@ -85,6 +105,8 @@
             <input type="file" id="hazFile" accept=".geojson,.json,application/geo+json,application/json"></label>
           <label class="field">Tinggi gedung (GeoJSON; properti <code>height</code> dalam meter atau <code>levels</code>)
             <input type="file" id="hgtFile" accept=".geojson,.json,application/geo+json,application/json"></label>
+          <label class="field">Grid penduduk ±30 m (CSV: <code>longitude,latitude,population</code>; mis. Meta/CIESIN High Resolution Population Density Maps, CC BY 4.0)
+            <input type="file" id="popFile" accept=".csv,text/csv"></label>
           <div class="row"><button class="btn" type="button" data-act="ee">Ambil tinggi dari Google Open Buildings (Earth Engine)</button></div>
           <p class="small muted" style="margin:0">Tanpa akun server Earth Engine: jalankan <code>tools/ee_export_heights.js</code> di code.earthengine.google.com dengan batas area <code id="bboxTxt"></code>, unduh GeoJSON-nya, lalu unggah di atas.</p>
           <p class="small" id="dgMsg" role="status" style="margin:0"></p>
@@ -104,17 +126,9 @@
     </div>
     <div>
       <div id="map" class="map" role="application" aria-label="Peta bangunan berwarna menurut apakah penghuninya sempat mengungsi"></div>
-      <div class="legend" style="margin-top:.5rem">
-        <span><i class="swatch box" style="background:#86c99a"></i>Sempat jalan kaki</span>
-        <span><i class="swatch box" style="background:#93b4f5"></i>Sempat ke shelter</span>
-        <span><i class="swatch box" style="background:#f3c46b"></i>Sebagian tidak sempat</span>
-        <span><i class="swatch box" style="background:#e0685e"></i>Tidak sempat</span>
-        <span><i class="swatch box" style="background:#1e3a8a"></i>Shelter terdaftar</span>
-        <span><i class="swatch box" style="background:#7c3aed"></i>Rekomendasi</span>
-        <span><i class="swatch box" style="background:#d1d5db"></i>Bukan hunian</span>
-        <span><i class="swatch box" style="background:#c7d2fe"></i>Gedung bertingkat (kandidat)</span>
-        <span><i class="swatch" style="background:#166534"></i>Sudah disurvei petugas</span>
-      </div>
+      <label class="small" style="display:block;margin-top:.4rem">Grid waktu evakuasi untuk:
+        <select id="tgMode"><option value="aman">zona aman & shelter resmi</option><option value="gedung">termasuk tanah tinggi & gedung terverifikasi</option></select></label>
+      <!-- Legend: dinamis di dalam peta, mengikuti lapisan aktif (common.js createMap) -->
     </div>
   </div>
 </template>

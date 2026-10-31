@@ -1,11 +1,23 @@
 // Aplikasi warga: lokasi nyata -> peringatan -> arah ke tempat aman -> posko terdekat.
 /* global maplibregl */
-import { api, Sync, createMap, covers, icon, esc, $, $$, toast, store, registerSW, STATUS_LABEL, SERVICE_LABEL, KIND_LABEL,
+import { api, Sync, createMap, TIER, covers, icon, esc, $, $$, toast, store, registerSW, STATUS_LABEL, SERVICE_LABEL, KIND_LABEL,
   confirmDialog, enablePush, currentPushSub, pushSupport, localNotify, isIOS, isStandalone } from './common.js';
-import { EdgeIndex, routeFromTable, isSafe, isHazard, headingToRoute, nextTurn, compassWord, fmtMinutes, fmtDistance,
-  remainingSeconds, verdict, advanceAlong, polylineLength, clockTime, timeAgo, haversine, SPEED } from './core.js';
+import { EdgeIndex, routeFromTable, tablesStale, isSafe, isHazard, headingToRoute, nextTurn, compassWord, fmtMinutes, fmtDistance,
+  remainingSeconds, verdict, isLate, deadlinePolicy, advanceAlong, polylineLength, clockTime, timeAgo, haversine, SPEED, capacityNote,
+  allocStamp } from './core.js';
 
 const DAY = 24 * 3600 * 1000;
+// ID perangkat acak (bukan data pribadi): memilih bagian alokasi bila penghuni satu bangunan dibagi ke beberapa tujuan.
+function deviceKey() {
+  let k = store.get('sempat_device', null);
+  if (!k || typeof k !== 'string') {
+    const a = new Uint8Array(8);
+    try { crypto.getRandomValues(a); } catch { for (let i = 0; i < 8; i++) a[i] = Math.floor(Math.random() * 256); }
+    k = Array.from(a, (x) => x.toString(16).padStart(2, '0')).join('');
+    store.set('sempat_device', k);
+  }
+  return k;
+}
 // Lokasi contoh untuk mencoba bila juri/warga tidak sedang di pesisir (koordinat kota, bukan titik resmi).
 const PRESETS = [
   { name: 'Padang', lat: -0.9420, lon: 100.3620 },
@@ -28,10 +40,33 @@ const S = {
   heading: null, online: true, offset: 0, walking: null, phase: null, html: {},
   quake: null, pushSub: null, pushMsg: '',
   vertical: false, amanRoute: null, gedungRoute: null, gedungKey: '',
+  deviceKey: deviceKey(), locks: store.get('sempat_alloclock', {}) || {},
 };
 const LEVEL_TXT = { waspada: 'WASPADA · < 0,5 m', siaga: 'SIAGA · 0,5–3 m', awas: 'AWAS · > 3 m' };
 const SRC_TXT = { survey: 'diverifikasi petugas', osm: 'jumlah lantai dari OpenStreetMap', osm_height: 'tinggi dari OpenStreetMap',
-  google: 'tinggi perkiraan satelit (Google Open Buildings)', upload: 'data tinggi gedung dari perencana' };
+  google: 'tinggi perkiraan satelit (Google Open Buildings)', upload: 'data tinggi gedung dari perencana',
+  osm_part: 'jumlah lantai bagian gedung dari OpenStreetMap' };
+// Tingkat kepastian gedung dari server (tsunami.verification, SATU definisi): hanya "verified" yang menjadi tujuan
+// rute. "unverified" (Perlu Verifikasi) dikirim terpisah di tables.dests.unverified: info TANPA rute & alokasi.
+// Gedung "unsafe" tidak pernah dikirim.
+const crowdNote = (d) => (d.crowded ? ' · Kapasitas diperkirakan hampir penuh oleh warga yang lebih dekat' : '');
+const srcNote = (d) => {
+  if (d.tier === 'verified') return `Diverifikasi petugas${crowdNote(d)}`;
+  const cav = (d.caveats || []).filter((c) => c !== 'Belum disurvei petugas');
+  return `Perlu Verifikasi — ${d.surveyed ? 'disurvei petugas, belum lengkap' : 'belum diverifikasi petugas'} · ${SRC_TXT[d.levels_src] || 'data peta'}${cav.length ? ` · ${cav.join(' · ')}` : ''}${crowdNote(d)}`;
+};
+// Lantai aman: keputusan memakai lantai KONSERVATIF (margin galat elevasi); nominal ditampilkan terpisah.
+const floorNote = (d) => (d.min_floor_nominal != null && d.min_floor_nominal !== d.min_floor
+  ? ` (tanpa margin galat peta: lantai ${d.min_floor_nominal})` : '');
+const margin = () => deadlinePolicy(S.tables).margin_s;
+// Gedung Perlu Verifikasi terdekat (maks. 3, 1 km): HANYA ditampilkan bila warga tidak sempat dan tidak ada gedung
+// terverifikasi yang terjangkau (keputusan 1 Nov 2026). Tanpa rute, tanpa angka kapasitas.
+function unverifiedNearby() {
+  const list = (S.tables && S.tables.dests && S.tables.dests.unverified) || [];
+  if (!S.pos) return [];
+  return list.map((g) => ({ g, d: haversine(S.pos.lat, S.pos.lon, g.lat, g.lon) })).filter((x) => x.d < 1000)
+    .sort((a, b) => a.d - b.d).slice(0, 3);
+}
 const now = () => Date.now() + S.offset;
 
 // ------------------------------------------------------------------ utilitas
@@ -133,6 +168,18 @@ function trimRoute(coords, pos) {
   return [[pos.lon, pos.lat], best.p, ...coords.slice(best.i)];
 }
 
+// Rute aman/gedung dari tabel + alokasi kapasitas. Jalur alokasi khusus (overrides) dikunci per hasil alokasi.
+function allocRoute(mode) {
+  const lock = S.locks[mode];
+  const r = routeFromTable(S.area, S.idx, S.tables, mode, S.group, S.pos, { deviceKey: S.deviceKey, lock });
+  const stamp = allocStamp(S.tables, mode);
+  let changed = false;
+  if (r.lock) { S.locks[mode] = r.lock; changed = true; }
+  else if (lock && (!stamp || lock.stamp !== stamp || lock.group !== S.group || !r.locked)) { delete S.locks[mode]; changed = true; }
+  if (changed) store.set('sempat_alloclock', S.locks);
+  return r;
+}
+
 function computeRoute() {
   S.route = null; S.amanRoute = null; S.gedungRoute = null;
   if (!areaReady() || !S.tables || S.tables.area_id !== S.area.meta.id) return;
@@ -152,25 +199,38 @@ function computeRoute() {
     return;
   }
   if (S.phase === 'EVAKUASI' || S.preview) {
-    S.route = S.amanRoute = routeFromTable(S.area, S.idx, S.tables, 'aman', S.group, S.pos);
+    S.route = S.amanRoute = allocRoute('aman');
     // Pilihan terakhir: gedung beton bertingkat terdekat yang cukup tinggi untuk skenario tsunami saat ini.
     const hasG = S.tables.tables && S.tables.tables[`gedung-${S.group}`];
-    S.gedungRoute = S.phase === 'EVAKUASI' && hasG ? routeFromTable(S.area, S.idx, S.tables, 'gedung', S.group, S.pos) : null;
+    S.gedungRoute = S.phase === 'EVAKUASI' && hasG ? allocRoute('gedung') : null;
     if (S.vertical && S.gedungRoute && S.gedungRoute.ok && S.gedungRoute.dest.type !== 'safe_zone') S.route = { ...S.gedungRoute, vertical: true };
   }
 }
 
 // Apakah perlu menawarkan gedung (tidak sempat ke tanah tinggi, atau waktu tiba tidak diketahui)?
 function verticalOffer() {
+  if (S.phase !== 'EVAKUASI' || S.target) return null;
   const g = S.gedungRoute, r = S.amanRoute;
-  if (S.phase !== 'EVAKUASI' || S.target || !g || !g.ok || g.dest.type === 'safe_zone') return null;
-  if (r && r.ok && g.timeS >= r.timeS - 30) return null;  // tanah tinggi sama cepatnya: tetap ke sana
   const a = activeAlert();
   const rem = a ? remainingSeconds(a, now()) : null;
-  const late = !r || !r.ok || (rem != null && r.timeS > rem - 60);
-  if (late) return { strong: true, g, rem };
-  if (rem == null) return { strong: false, g, rem };
+  // "terlambat" = definisi yang sama dengan verdict dan alokasi (isLate, margin dari server)
+  const late = !r || !r.ok || isLate(r.timeS, rem, margin());
+  const hasG = g && g.ok && g.dest.type !== 'safe_zone';
+  const verifiedG = hasG && (g.dest.type === 'gedung' || g.dest.type === 'shelter');
+  const unv = late && !verifiedG ? unverifiedNearby() : [];
+  if (!hasG) return unv.length ? { strong: true, g: null, rem, unv } : null;
+  if (r && r.ok && g.timeS >= r.timeS - 30) return unv.length ? { strong: true, g: null, rem, unv } : null;
+  if (late) return { strong: true, g, rem, unv };
+  if (rem == null) return { strong: false, g, rem, unv };
   return null;
+}
+
+function unverifiedHTML(unv) {
+  if (!unv || !unv.length) return '';
+  return `<div class="vbox unv" role="note"><h3>${icon('warning')} Gedung belum diverifikasi di sekitar Anda</h3>
+    <p class="small" style="margin:0 0 .3rem"><strong>Bukan rekomendasi SEMPAT.</strong> Kelayakan gedung ini belum diperiksa petugas
+    (struktur, akses, kondisi). Tidak ada rute. Utamakan tanah tinggi; bila benar-benar tidak ada pilihan lain, naik setinggi mungkin ke gedung beton yang kokoh.</p>
+    <ul class="small" style="margin:0;padding-left:1.1rem">${unv.map(({ g, d }) => `<li><strong>${esc(g.name)}</strong> · ± ${esc(fmtDistance(d))} · ${esc(g.levels)} lantai · lantai aman perkiraan ${esc(g.min_floor)}+${esc(floorNote(g))}<br><span class="srcnote">${esc((g.caveats || []).slice(0, 3).join(' · '))}</span></li>`).join('')}</ul></div>`;
 }
 
 async function refreshPosko(force = false) {
@@ -361,6 +421,20 @@ function renderNav() {
   const r = S.route;
   const actions = [];
   $('#navWarn').classList.add('hidden');
+  const warns = [];
+  if (S.tables && tablesStale(S.tables, now())) {
+    // Tabel dihitung untuk jam buka gedung tertentu; tanpa koneksi, jam buka/tutup bisa sudah berubah.
+    warns.push('Data rute dari jam sebelumnya: jam buka gedung mungkin sudah berubah. Utamakan tanah tinggi.');
+  }
+  if (S.tables && !S.target && (S.phase === 'EVAKUASI' || S.preview)) {
+    // Status daya tampung SELALU terlihat bila belum dihitung / gagal / tidak cukup (jangan diam-diam dianggap valid).
+    const cn = capacityNote(S.tables, r && r.vertical ? 'gedung' : 'aman');
+    if (cn) warns.push(cn.text);
+    if (r && r.allocation && r.allocation.unresolved > 0) {
+      warns.push(`Daya tampung di sekitar sini tidak cukup untuk ${r.allocation.unresolved} warga bangunan ini: terus bergerak ke tempat tertinggi dan ikuti arahan petugas.`);
+    }
+  }
+  if (warns.length) { $('#navWarn').textContent = warns.join(' '); $('#navWarn').classList.remove('hidden'); }
   if (S.locating || !areaReady()) {
     $('#navDist').innerHTML = '<span class="spinner"></span>';
     $('#navTime').textContent = 'Mengunduh peta jalan & ketinggian di sekitar Anda…';
@@ -404,8 +478,8 @@ function renderNav() {
   if (d.type === 'tanah_tinggi') {
     dest = `Tujuan: <strong>tanah lebih tinggi terdekat</strong> (± ${esc(Math.round(d.elev))} m) — di atas perkiraan tsunami + galat peta. Pilihan darurat: terus naik bila bisa.`;
   } else if (d.type === 'shelter' || d.type === 'gedung') {
-    dest = `Tujuan: <strong>${esc(d.name)}</strong> — ${d.type === 'shelter' ? 'gedung evakuasi resmi' : 'gedung bertingkat (pilihan darurat)'}, <strong>naik minimal ke lantai ${esc(d.min_floor || 3)}</strong>${d.levels ? ` dari ${d.levels} lantai` : ''}. Jangan ke basement.
-      <br><span class="srcnote">${d.verified ? 'Diverifikasi petugas' : `Belum diverifikasi petugas — ${esc(SRC_TXT[d.levels_src] || 'data peta')}`}</span>`;
+    dest = `Tujuan: <strong>${esc(d.name)}</strong> — ${d.type === 'shelter' ? 'gedung evakuasi resmi' : 'gedung bertingkat (pilihan darurat)'}, <strong>naik minimal ke lantai ${esc(d.min_floor || 3)}</strong>${d.levels ? ` dari ${d.levels} lantai` : ''}${esc(floorNote(d))}. Jangan ke basement.
+      <br><span class="srcnote">${esc(srcNote(d))}</span>`;
   }
   else if (d.type === 'safe_zone') dest = `Tujuan: <strong>tempat aman</strong>${d.elev != null ? ` (ketinggian ± ${Math.round(d.elev)} m)` : ''} — terus naik bila masih bisa.`;
   else dest = `Tujuan: <strong>${esc(d.name)}</strong> · ${esc(KIND_LABEL[d.kind] || '')} <span class="chip ${esc(d.status)}">${esc(STATUS_LABEL[d.status] || d.status)}</span>`;
@@ -436,18 +510,19 @@ function renderVertical() {
   }
   const o = verticalOffer();
   if (!o) { setHTML(el, ''); return; }
+  if (!o.g) { setHTML(el, unverifiedHTML(o.unv)); return; }
   const d = o.g.dest;
   if (d.type === 'tanah_tinggi') {
     setHTML(el, `<div class="vbox"><h3>${o.strong ? 'Tidak sempat ke tempat aman?' : 'Pilihan darurat bila waktu habis'}</h3>
       <p style="margin:0"><strong>Tanah lebih tinggi terdekat</strong> (± ${esc(Math.round(d.elev))} m) · ± ${esc(fmtMinutes(o.g.timeS))} · ${esc(fmtDistance(o.g.distM))}</p>
-      <p class="srcnote" style="margin:.2rem 0 .5rem">Di atas perkiraan tsunami ± ${esc(String(S.tables.scenario ? S.tables.scenario.wave_m : '').replace('.', ','))} m ditambah galat peta ketinggian. Tidak ada gedung layak yang lebih dekat.</p>
-      <button class="btn ${o.strong ? 'danger' : ''}" data-act="vertical-on">${icon('arrow')} Arahkan ke sana</button></div>`);
+      <p class="srcnote" style="margin:.2rem 0 .5rem">Di atas perkiraan tsunami ± ${esc(String(S.tables.scenario ? S.tables.scenario.wave_m : '').replace('.', ','))} m ditambah galat peta ketinggian. Tidak ada gedung terverifikasi yang lebih dekat.</p>
+      <button class="btn ${o.strong ? 'danger' : ''}" data-act="vertical-on">${icon('arrow')} Arahkan ke sana</button></div>${unverifiedHTML(o.unv)}`);
     return;
   }
-  const src = d.verified ? 'Diverifikasi petugas' : `Belum diverifikasi petugas (${esc(SRC_TXT[d.levels_src] || 'data peta')}) — periksa kondisi gedung`;
-  setHTML(el, `<div class="vbox ${d.verified ? 'ver' : ''}"><h3>${o.strong ? 'Tidak sempat ke tanah tinggi?' : 'Pilihan darurat bila waktu habis'}</h3>
+  const src = d.tier === 'verified' ? esc(srcNote(d)) : `${esc(srcNote(d))} — periksa kondisi gedung`;
+  setHTML(el, `<div class="vbox ${d.tier === 'verified' ? 'ver' : ''}"><h3>${o.strong ? 'Tidak sempat ke tanah tinggi?' : 'Pilihan darurat bila waktu habis'}</h3>
     <p style="margin:0"><strong>${esc(d.name)}</strong> · ± ${esc(fmtMinutes(o.g.timeS))} · ${esc(fmtDistance(o.g.distM))}</p>
-    <p style="margin:.2rem 0"><strong>Naik minimal ke lantai ${esc(d.min_floor)}</strong> (gedung ${esc(d.levels)} lantai). Lebih tinggi lebih baik.</p>
+    <p style="margin:.2rem 0"><strong>Naik minimal ke lantai ${esc(d.min_floor)}</strong> (gedung ${esc(d.levels)} lantai)${esc(floorNote(d))}. Lebih tinggi lebih baik.</p>
     <p class="srcnote" style="margin:0 0 .5rem">${src}</p>
     <button class="btn ${o.strong ? 'danger' : ''}" data-act="vertical-on">${icon('arrow')} Arahkan ke gedung ini</button></div>`);
 }
@@ -459,7 +534,7 @@ function setVerdict(routeS, hide = false, text = null) {
   if (text) { v.className = 'verdict unknown'; v.textContent = text; return; }
   const a = activeAlert();
   const rem = a ? remainingSeconds(a, now()) : null;
-  const vd = routeS == null ? { level: 'unknown', text: 'Rute belum tersedia.' } : verdict(routeS, rem);
+  const vd = routeS == null ? { level: 'unknown', text: 'Rute belum tersedia.' } : verdict(routeS, rem, margin());
   if (S.route && S.route.vertical && rem != null) {
     if (vd.level === 'late' && rem > 0) vd.text = 'Waktu sangat mepet. Bila gelombang terlihat, masuk gedung beton terdekat mana pun dan naik setinggi mungkin.';
     else if (vd.level === 'ok') vd.text = 'Anda diperkirakan sempat sampai. Terus bergerak, lalu naik.';
@@ -573,16 +648,34 @@ function renderMap() {
     list = S.tables.dests.gedung.filter((g) => g.lat != null).map((g) => ({ g, d: haversine(S.pos.lat, S.pos.lon, g.lat, g.lon) }))
       .filter((x) => x.d < 2000).sort((a, b) => a.d - b.d).slice(0, 15).map((x) => x.g);
   }
-  const key = list.map((g) => `${g.id}:${g.min_floor}`).join(',');
+  // Gedung Perlu Verifikasi: penanda berbeda, TANPA rute, hanya saat tidak sempat & tanpa gedung terverifikasi.
+  const o = S.phase === 'EVAKUASI' ? verticalOffer() : null;
+  const unv = (o && o.unv) ? o.unv.map((x) => ({ ...x.g, info_only: true })) : [];
+  const all = list.concat(unv);
+  const key = all.map((g) => `${g.id}:${g.min_floor}:${g.tier}`).join(',');
   if (key !== S.gedungKey) {
     S.gedungKey = key;
-    m.setGedung(list, (g) => popup({ ...g, kind: null }, `<br>Naik minimal ke <strong>lantai ${esc(g.min_floor)}</strong> (gedung ${esc(g.levels)} lantai)<br><span style="color:#4b5563">${g.verified ? 'Diverifikasi petugas' : esc('Belum diverifikasi — ' + (SRC_TXT[g.levels_src] || 'data peta'))}</span>`));
+    m.setGedung(all, (g) => popup({ ...g, kind: null }, g.info_only
+      ? `<br><strong>Belum diverifikasi — bukan rekomendasi.</strong> Tidak ada rute.<br>Lantai aman perkiraan ${esc(g.min_floor)}+ (gedung ${esc(g.levels)} lantai)<br><span style="color:#4b5563">${esc((g.caveats || []).slice(0, 3).join(' · '))}</span>`
+      : `<br>Naik minimal ke <strong>lantai ${esc(g.min_floor)}</strong> (gedung ${esc(g.levels)} lantai)${esc(floorNote(g))}<br><span style="color:#4b5563">${esc(srcNote(g))}</span>`));
   }
 }
 
 function popup(p, extra = '') {
   new maplibregl.Popup({ closeButton: true, maxWidth: '260px' }).setLngLat([p.lon, p.lat])
     .setHTML(`<strong>${esc(p.name)}</strong><br>${esc(KIND_LABEL[p.kind] || '')}${p.status && p.status !== 'osm' ? ` · ${esc(STATUS_LABEL[p.status] || p.status)}` : ''}${(p.services || []).length ? `<br><span style="color:#4b5563">${p.services.map((s) => esc(SERVICE_LABEL[s] || s)).join(', ')}</span>` : ''}${extra}`)
+    .addTo(S.m.map);
+}
+
+// Detail gedung untuk warga: sederhana, status tier server, TANPA rute untuk gedung yang belum terverifikasi.
+function buildingPopup(b) {
+  const t = TIER[b.tier] || TIER.unverified;
+  const lv = b.levels_src === 'default' ? 'jumlah lantai belum diketahui' : `${b.levels} lantai${b.levels_est ? ' (perkiraan)' : ''}`;
+  const msg = b.tier === 'verified' ? 'Bisa menjadi tujuan evakuasi vertikal bila cukup tinggi untuk peringatan saat ini.'
+    : b.tier === 'unsafe' ? 'Tidak dipakai sebagai tempat evakuasi.' : 'Belum diverifikasi petugas — bukan rekomendasi SEMPAT.';
+  new maplibregl.Popup({ closeButton: true, maxWidth: '260px' }).setLngLat([b.lon, b.lat])
+    .setHTML(`<div class="bld-pop"><h3>${esc(b.name || 'Bangunan')}</h3><span class="tier-badge t-${esc(b.tier || 'unverified')}">${esc(t.label)}</span>
+      <div class="small">${esc(lv)}${b.hazard ? ' · di zona bahaya' : ''}</div><div class="small">${esc(msg)}</div></div>`)
     .addTo(S.m.map);
 }
 
@@ -794,8 +887,8 @@ async function onAction(act, el) {
     S.src = 'sim'; store.set('sempat_src', 'sim'); stopGPS(); stopWalk();
     await S.sync.setArea(S.defaultArea.id);
     const c = S.area.meta.center;
-    const b = S.area.buildings.filter((x) => x.hazard && x.residents > 0)[0];
-    await setPos(b ? { lat: b.lat, lon: b.lon } : { lat: c[1], lon: c[0] }, { center: true });
+    const ds = S.area.meta.demo_start;  // dari server: payload warga tidak memuat penduduk per bangunan
+    await setPos(ds ? { lat: ds[1], lon: ds[0] } : { lat: c[1], lon: c[0] }, { center: true });
     return;
   }
   update();
@@ -846,10 +939,17 @@ async function main() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', onSWMessage);
 
   // Peta dasar langsung tampil (Indonesia), sebelum lokasi diketahui
-  S.m = createMap($('#map'), null);
+  // Preset warga: sederhana (rute, zona bahaya, jalan, penanda). Kelayakan & 3D bisa dinyalakan dari "Lapisan".
+  S.m = createMap($('#map'), null, { groups: ['rute', 'bahaya', 'jalan', 'penanda', 'kelayakan', 'bangunan3d'],
+    defaults: ['rute', 'bahaya', 'jalan', 'penanda'] });
   S.m.map.on('dragstart', (e) => { if (e.originalEvent) { S.follow = false; renderLoc(); } });
   S.m.map.on('click', (ev) => {
-    if (S.src === 'gps') { toast('Untuk memilih lokasi sendiri, ketuk “Pilih di peta”.'); return; }
+    if (S.src === 'gps') {
+      const bid = S.m.buildingAt(ev.point);
+      const b = bid && S.area ? S.area.buildings.find((x) => x.id === bid) : null;
+      if (b) { buildingPopup(b); return; }
+      toast('Untuk memilih lokasi sendiri, ketuk “Pilih di peta”.'); return;
+    }
     stopWalk();
     S.src = 'sim'; store.set('sempat_src', 'sim');
     S.atShelter = null; if (S.target) S.target.arrived = false;
@@ -872,6 +972,11 @@ async function main() {
       S.m.setOfficial(area.official_points);
       S.m.setFacilities(area.facilities || [], (p) => popup(p, '<br><span style="color:#4b5563">Data OpenStreetMap, belum diverifikasi petugas</span>'));
       if (S.pos) S.m.follow(S.pos, 16);
+    },
+    onAreaPatch: (area, changed, removed) => {
+      S.area = area;
+      S.m.patchBuildings(area, changed, removed);
+      update();
     },
     onState: (st) => {
       if (st.area_id !== (S.area && S.area.meta.id)) return;
