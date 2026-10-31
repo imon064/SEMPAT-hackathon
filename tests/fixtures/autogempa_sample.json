@@ -1,0 +1,18 @@
+{
+  "Infogempa": {
+    "gempa": {
+      "Tanggal": "31 Okt 2026",
+      "Jam": "12:34:56 WIB",
+      "DateTime": "2026-10-31T05:34:56+00:00",
+      "Coordinates": "-9.85,112.40",
+      "Lintang": "9.85 LS",
+      "Bujur": "112.40 BT",
+      "Magnitude": "7.2",
+      "Kedalaman": "20 km",
+      "Wilayah": "CONTOH UJI: 150 km BaratDaya PESISIR SELATAN",
+      "Potensi": "Berpotensi tsunami untuk diteruskan pada masyarakat",
+      "Dirasakan": "-",
+      "Shakemap": "20261031123456.mmi.jpg"
+    }
+  }
+}

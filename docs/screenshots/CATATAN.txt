@@ -1,0 +1,4 @@
+Tangkapan layar ini dibuat otomatis oleh uji E2E (tests/e2e/e2e.js) di server tanpa internet:
+peta dasar (CARTO/OSM) tidak termuat sehingga latar peta polos, dan data jalannya desa sintetis
+yang dipindahkan ke koordinat Padang/Pacitan. Untuk pitch deck, ambil ulang tangkapan layar dari HP
+dengan server yang terhubung internet (start_windows_online.bat).

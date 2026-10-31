@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#b91c1c">
+<meta name="description" content="SEMPAT — petunjuk evakuasi tsunami: ke tempat aman lalu ke posko terdekat.">
+<title>SEMPAT — Evakuasi Tsunami</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="/static/vendor/maplibre-gl.js" defer></script>
+<script type="module" src="/static/js/warga.js"></script>
+</head>
+<body>
+<a class="sr-only" href="#main">Lewati ke isi utama</a>
+<div class="app" id="app">
+  <header class="statusbar">
+    <span class="brand">SEMPAT</span>
+    <span id="areaName" class="small"></span>
+    <span id="conn" role="status" aria-live="polite"><span class="dot off"></span>Menghubungkan…</span>
+  </header>
+  <div id="banners"></div>
+  <div id="countdown" class="countdown hidden" role="timer" aria-live="off"></div>
+
+  <main id="main">
+    <section id="stateCard" class="card state info" aria-live="polite">
+      <div class="state-title">Memuat data peta…</div>
+      <p class="muted small">Jika lama: pastikan server SEMPAT berjalan. Saat gempa kuat, jangan menunggu aplikasi — langsung ke tempat tinggi.</p>
+    </section>
+
+    <section id="navCard" class="card stack hidden" aria-labelledby="navTitle">
+      <h2 id="navTitle" class="sr-only">Petunjuk arah</h2>
+      <div class="nav-top">
+        <div class="arrow" aria-hidden="true"><svg id="arrowSvg" viewBox="0 0 24 24"><path d="M12 2 20 20 12 15.5 4 20Z" fill="currentColor"/></svg></div>
+        <div>
+          <div class="big-num" id="navDist">–</div>
+          <div class="nav-time" id="navTime"></div>
+          <div class="muted" id="navDir"></div>
+        </div>
+      </div>
+      <p class="nav-turn" id="navTurn" aria-live="polite"></p>
+      <p id="navDest" style="margin:0"></p>
+      <div id="navVerdict" class="verdict unknown" role="status"></div>
+      <label class="check"><input type="checkbox" id="slowToggle"> Saya berjalan lambat / bersama lansia, anak, atau difabel</label>
+      <div class="row" id="navActions"></div>
+      <p id="navWarn" class="small muted hidden"></p>
+    </section>
+
+    <div class="map-wrap">
+      <div id="map" class="map tall" role="application" aria-label="Peta evakuasi. Garis biru adalah rute Anda."></div>
+      <button type="button" id="recenter" class="btn primary map-btn hidden">Pusatkan ke saya</button>
+    </div>
+    <div class="legend" aria-hidden="true">
+      <span><i class="swatch" style="background:#1d4ed8"></i>Rute Anda</span>
+      <span><i class="swatch" style="background:#dc2626;opacity:.6"></i>Zona bahaya</span>
+      <span><i class="swatch" style="background:#16a34a;opacity:.6"></i>Zona aman</span>
+      <span><i class="swatch" style="background:#b91c1c"></i>Jalan putus</span>
+      <span><i class="swatch box" style="background:#166534;border-radius:50%"></i>Posko / bantuan</span>
+      <span><i class="swatch box" style="background:#14532d"></i>Titik kumpul resmi</span>
+      <span><i class="swatch box" style="background:#475569;border-radius:50%"></i>Fasilitas umum (OSM)</span>
+    </div>
+
+    <section id="locCard" class="card stack" aria-labelledby="locTitle">
+      <div class="row"><h2 id="locTitle" class="grow" style="margin:0;font-size:1.05rem">Lokasi Anda</h2><span id="locStatus" class="small muted"></span></div>
+      <div class="seg" role="group" aria-label="Sumber lokasi">
+        <button type="button" data-src="gps" aria-pressed="false">GPS ponsel</button>
+        <button type="button" data-src="sim" aria-pressed="false">Pilih di peta</button>
+      </div>
+      <p id="locHint" class="small" style="margin:0"></p>
+      <div id="presets" class="presets hidden"></div>
+      <div class="row hidden" id="simRow">
+        <button type="button" id="walkBtn" class="btn">Simulasikan berjalan</button>
+        <span class="small muted">Bergerak mengikuti rute, 10× lebih cepat dari jalan kaki — hanya untuk uji.</span>
+      </div>
+    </section>
+
+    <section id="poskoCard" class="card stack hidden" aria-labelledby="poskoTitle">
+      <h2 id="poskoTitle" style="margin:0">Posko &amp; bantuan terdekat</h2>
+      <p class="small muted" style="margin:0">Diurutkan menurut waktu jalan kaki lewat jalan yang bisa dilalui. Hanya titik yang buka dan belum penuh.</p>
+      <div id="poskoList" class="list" aria-live="polite"></div>
+    </section>
+
+    <details class="card" id="help">
+      <summary>Cara memakai &amp; cara SEMPAT menghitung</summary>
+      <ul>
+        <li><strong>Gempa kuat atau lama (± 20 detik)?</strong> Jangan menunggu peringatan atau aplikasi. Langsung ke tempat tinggi.</li>
+        <li>Saat peringatan tsunami, layar merah muncul. Ketuk <em>Tunjukkan jalan</em>, lalu ikuti panah biru.</li>
+        <li>Jika berjalan lambat atau membawa lansia/anak, centang pilihannya. Waktu tempuh dihitung ulang.</li>
+        <li>Setelah sampai di tempat aman, SEMPAT menunjukkan posko terdekat yang masih buka dan belum penuh.</li>
+        <li>Rute terakhir disimpan di ponsel. Saat internet putus, panah tetap bekerja dengan data terakhir.</li>
+        <li>Rute dihitung dari peta jalan dan ketinggian tanah: jalan menanjak lebih lambat (rumus Tobler), kecepatan 1,0 m/detik (umum) dan 0,5 m/detik (lansia/difabel).</li>
+        <li>SEMPAT membantu, bukan pengganti arahan resmi BMKG, BPBD, dan petugas di lapangan.</li>
+      </ul>
+    </details>
+  </main>
+  <footer class="foot" id="foot"></footer>
+</div>
+
+<div id="overlay" class="alert-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="ovTitle" aria-describedby="ovAction"></div>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1e3a8a">
+<title>SEMPAT — Dasbor Perencana BPBD</title>
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="/static/vendor/maplibre-gl.js" defer></script>
+<script src="/static/vendor/qrcode.js" defer></script>
+<script type="module" src="/static/js/perencana.js"></script>
+</head>
+<body>
+<a class="sr-only" href="#root">Lewati ke isi utama</a>
+<div class="app wide">
+  <header class="statusbar">
+    <span class="brand">SEMPAT · Perencana BPBD</span>
+    <span id="areaName" class="small"></span>
+    <span id="conn" role="status" aria-live="polite"><span class="dot off"></span>Menghubungkan…</span>
+    <span id="who" class="small"></span>
+  </header>
+  <div id="banners"></div>
+  <div id="root"></div>
+</div>
+
+<template id="dashTpl">
+  <div class="dash">
+    <div class="side">
+      <section class="card stack no-print" aria-labelledby="anTitle">
+        <h2 id="anTitle" style="margin:0">Area analisis</h2>
+        <p class="small muted" style="margin:0">Geser &amp; perbesar peta ke desa mana pun (≤ 16 km²), lalu analisis. SEMPAT mengunduh jalan, bangunan, dan ketinggian nyata dari OpenStreetMap dan DEM.</p>
+        <div class="row"><button class="btn primary" id="analyzeBtn" data-act="analyze" type="button">Analisis area di layar</button>
+          <button class="btn" data-act="area" type="button">Area tersimpan</button></div>
+        <p class="small" id="analyzeMsg" role="status" style="margin:0"></p>
+      </section>
+
+      <section class="card stack no-print" aria-labelledby="scTitle">
+        <h2 id="scTitle" style="margin:0">Skenario</h2>
+        <div class="range"><div class="lbl"><label for="eta">Gelombang tiba setelah gempa</label><output id="etaV"></output></div>
+          <input type="range" id="eta" min="5" max="60" step="1"></div>
+        <div class="range"><div class="lbl"><label for="delay">Warga mulai bergerak setelah</label><output id="delayV"></output></div>
+          <input type="range" id="delay" min="0" max="20" step="1" value="5"></div>
+        <div class="range"><div class="lbl"><label for="margin">Margin keselamatan</label><output id="marginV"></output></div>
+          <input type="range" id="margin" min="0" max="10" step="1" value="2"></div>
+        <p style="margin:0">Waktu untuk berjalan: <strong id="budgetV">–</strong></p>
+        <div class="range"><div class="lbl"><label for="k">Cari gedung tambahan sebagai shelter vertikal</label><output id="kV"></output></div>
+          <input type="range" id="k" min="0" max="10" step="1" value="5"></div>
+        <label class="check"><input type="checkbox" id="useReg" checked> Hitung shelter yang sudah terdaftar</label>
+        <p class="small muted" id="calcStatus" role="status" style="margin:0"></p>
+      </section>
+
+      <section class="card stack" aria-labelledby="resTitle">
+        <h2 id="resTitle" style="margin:0">Hasil: siapa yang tidak sempat?</h2>
+        <div class="stats" id="stats"></div>
+        <div>
+          <div class="small muted">Orang yang tidak sempat vs. jumlah gedung rekomendasi ditambahkan</div>
+          <div class="bars" id="bars" aria-hidden="true"></div>
+          <div class="bars-x" id="barsX" aria-hidden="true"></div>
+          <p class="sr-only" id="barsText"></p>
+        </div>
+      </section>
+
+      <section class="card stack" aria-labelledby="recTitle">
+        <h2 id="recTitle" style="margin:0">Rekomendasi shelter vertikal</h2>
+        <p class="small muted" style="margin:0">Dipilih bertahap: tiap langkah memilih gedung yang paling banyak menambah orang yang sempat, dengan memperhitungkan kapasitas. Wajib diverifikasi kekuatan strukturnya oleh ahli sebelum ditetapkan.</p>
+        <div class="list" id="recList"></div>
+      </section>
+
+      <section class="card stack" aria-labelledby="regTitle">
+        <h2 id="regTitle" style="margin:0">Shelter terdaftar</h2>
+        <p class="small muted" style="margin:0">Shelter terdaftar langsung menjadi tujuan rute warga.</p>
+        <div class="list" id="regList"></div>
+      </section>
+
+      <section class="card stack" id="infoCard" aria-labelledby="infoTitle">
+        <h2 id="infoTitle" style="margin:0">Panduan per titik</h2>
+        <p class="muted" id="infoEmpty" style="margin:0">Klik rumah atau titik mana pun di peta untuk membuat panduan evakuasi yang bisa dicetak dan ditempel, lengkap dengan kode QR.</p>
+        <div id="infoBody" class="stack hidden"></div>
+      </section>
+
+      <section class="card stack" aria-labelledby="dataTitle">
+        <h2 id="dataTitle" style="margin:0">Transparansi data &amp; asumsi</h2>
+        <div id="dataBody" class="small"></div>
+      </section>
+    </div>
+    <div>
+      <div id="map" class="map" role="application" aria-label="Peta bangunan berwarna menurut apakah penghuninya sempat mengungsi"></div>
+      <div class="legend" style="margin-top:.5rem">
+        <span><i class="swatch box" style="background:#86c99a"></i>Sempat jalan kaki</span>
+        <span><i class="swatch box" style="background:#93b4f5"></i>Sempat ke shelter</span>
+        <span><i class="swatch box" style="background:#f3c46b"></i>Sebagian tidak sempat</span>
+        <span><i class="swatch box" style="background:#e0685e"></i>Tidak sempat</span>
+        <span><i class="swatch box" style="background:#1e3a8a"></i>Shelter terdaftar</span>
+        <span><i class="swatch box" style="background:#7c3aed"></i>Rekomendasi</span>
+        <span><i class="swatch box" style="background:#d1d5db"></i>Bukan hunian</span>
+      </div>
+    </div>
+  </div>
+</template>
+</body>
+</html>

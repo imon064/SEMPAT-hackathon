@@ -1,0 +1,11 @@
+# Data yang dibuat saat berjalan (database, akun, kunci, area)
+data/
+.venv/
+__pycache__/
+*.pyc
+tests/js/area.json
+tests/js/tables.json
+tests/js/cases.json
+tests/e2e/out/
+node_modules/
+tools/cloudflared*

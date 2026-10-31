@@ -1,0 +1,7 @@
+data/
+.venv/
+**/__pycache__/
+tests/js/*.json
+tests/e2e/out/
+node_modules/
+tools/cloudflared*

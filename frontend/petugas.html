@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d4ed8">
+<title>SEMPAT — Petugas Lapangan</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="/static/vendor/maplibre-gl.js" defer></script>
+<script src="/static/vendor/qrcode.js" defer></script>
+<script type="module" src="/static/js/petugas.js"></script>
+</head>
+<body>
+<a class="sr-only" href="#root">Lewati ke isi utama</a>
+<div class="app wide">
+  <header class="statusbar">
+    <span class="brand">SEMPAT · Petugas</span>
+    <span id="areaName" class="small"></span>
+    <span id="conn" role="status" aria-live="polite"><span class="dot off"></span>Menghubungkan…</span>
+    <span id="who" class="small"></span>
+  </header>
+  <div id="banners"></div>
+  <div id="modeBanner" class="mode-banner hidden" role="status" aria-live="assertive"></div>
+  <div id="root"></div>
+</div>
+
+<template id="dashTpl">
+  <div class="dash">
+    <div class="side">
+      <section class="card stack" id="alertCard" aria-live="polite"></section>
+
+      <section class="card stack" aria-labelledby="ptTitle">
+        <div class="row"><h2 id="ptTitle" class="grow" style="margin:0">Titik bantuan</h2>
+          <button class="btn primary" data-act="addpoint" type="button">+ Tambah titik</button></div>
+        <p class="small muted" style="margin:0">Perbarui status setiap ada perubahan. Warga hanya diarahkan ke titik yang <strong>buka dan belum penuh</strong>.</p>
+        <div class="list" id="pointList"></div>
+      </section>
+
+      <section class="card stack" aria-labelledby="clTitle">
+        <div class="row"><h2 id="clTitle" class="grow" style="margin:0">Jalan putus / terhalang</h2>
+          <button class="btn" data-act="addclosure" type="button">Tandai di peta</button></div>
+        <p class="small muted" style="margin:0">Ruas yang ditandai langsung dihindari oleh rute semua warga.</p>
+        <div class="list" id="closureList"></div>
+      </section>
+
+      <section class="card stack" id="demoCard">
+        <h2 style="margin:0">Uji &amp; demo</h2>
+        <div id="openPhone"></div>
+        <p class="small muted" style="margin:0">Reset: cabut peringatan, hapus titik &amp; jalan putus buatan, pulihkan titik contoh.</p>
+        <div class="row">
+          <button class="btn" data-act="reset" type="button">Reset data demo</button>
+          <a class="btn ghost" href="/" target="_blank" rel="noopener">Buka aplikasi warga ↗</a>
+        </div>
+      </section>
+    </div>
+    <div>
+      <div id="map" class="map" role="application" aria-label="Peta wilayah. Ketuk untuk menaruh titik saat mode tambah aktif."></div>
+      <div class="legend" style="margin-top:.5rem">
+        <span><i class="swatch box" style="background:#166534;border-radius:50%"></i>Kosong</span>
+        <span><i class="swatch box" style="background:#1d4ed8;border-radius:50%"></i>Agak ramai</span>
+        <span><i class="swatch box" style="background:#b45309;border-radius:50%"></i>Ramai</span>
+        <span><i class="swatch box" style="background:#b91c1c;border-radius:50%"></i>Penuh / tutup</span>
+        <span><i class="swatch" style="background:#b91c1c"></i>Jalan putus</span>
+        <span><i class="swatch" style="background:#dc2626;opacity:.6"></i>Zona bahaya</span>
+        <span><i class="swatch" style="background:#16a34a;opacity:.6"></i>Zona aman</span>
+        <span><i class="swatch box" style="background:#475569;border-radius:50%"></i>Fasilitas umum (OSM)</span>
+      </div>
+    </div>
+  </div>
+</template>
+</body>
+</html>
